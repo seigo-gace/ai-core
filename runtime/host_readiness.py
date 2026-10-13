@@ -15,19 +15,15 @@ from model_gate import (AdmissionError, ExistingContainerDriver,
                         verify_parent_budget)
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ('granite', 'qwen3', 'ministral', 'coder')
-
 
 def report(compose, policy, driver=None, parent_budget=None):
     """Return bounded, secret-free facts; injectable driver for offline tests."""
     items = model_specs_from_compose(compose, policy)
-    if set(items) != set(MODELS):
-        raise AdmissionError(409, 'MODEL_SET_MISMATCH')
     budget = (verify_parent_budget(items, policy)
               if parent_budget is None else parent_budget)
     driver = driver or ExistingContainerDriver(compose)
     containers, resident = [], 0
-    for model in MODELS:
+    for model in items:
         spec = items[model]
         detail = {'model': model, 'api_port': spec['backend_port'],
                   'gate_port': spec['gate_port'], 'warm': spec['warm'],
@@ -98,7 +94,7 @@ def main(argv=None):
         print('HOST_READINESS=FAIL|BACKEND_CONTRACT_MISMATCH')
         return 2
     if output['running_backends'] > policy['max_resident']:
-        print('HOST_READINESS=BLOCKED|FOUR_RESIDENT_PRODUCTION_PRESERVED')
+        print('HOST_READINESS=BLOCKED|RESIDENT_COUNT_EXCEEDS_POLICY')
         return 0
     print('HOST_READINESS=PASS_READ_ONLY|EXCLUSIVE_TRAFFIC_UNVERIFIED')
     return 0
