@@ -221,6 +221,7 @@ class Coordinator:
         self.specs, self.driver = specs, driver
         self.max_loaded, self.max_active = max_loaded, max_active
         self.observe_only = observe_only
+        self.transitioning = set()  # cold-loading model; prohibit another cold transition
         self.idle_seconds, self.start_timeout, self.clock = idle_seconds, start_timeout, clock
         self.lock = threading.RLock()
         self.active = {name:0 for name in specs}
@@ -255,52 +256,68 @@ class Coordinator:
             loaded.remove(victim)
         return evicted
 
+    def _restore_previous(self, target, previous):
+        # Called only while holding self.lock. Roll back even when Docker
+        # stopped a resident before returning its stop acknowledgment.
+        spec = self.specs[target]
+        if self.driver.running(spec):
+            self.driver.stop(spec)
+        for old in previous:
+            if not self.driver.running(self.specs[old]):
+                self.driver.start(self.specs[old])
+            if not self.driver.running(self.specs[old]):
+                raise AdmissionError(503, 'ROLLBACK_RESIDENT_NOT_RUNNING')
+
     def acquire(self, model):
         if model not in self.specs:
             raise AdmissionError(404, 'UNKNOWN_MODEL')
         if not self.semaphore.acquire(blocking=False):
             raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
         try:
+            spec = self.specs[model]
+            previous = None
             with self.lock:
-                spec = self.specs[model]
-                # Existing llama.cpp backends use -np 1; never send two
-                # simultaneous inferences into one model under one lease.
                 if self.active[model]:
                     raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
-                if not self.driver.running(spec):
-                    # Compatibility stage: no model lifecycle mutation even
-                    # with four preexisting residents and legacy consumers.
-                    if self.observe_only:
-                        raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
-                    # Capture the complete pre-transition resident set BEFORE
-                    # the first eviction; a stop may succeed and then fail
-                    # before _make_room returns its eviction list.
-                    previous = self.running()
+                if model in self.transitioning:
+                    raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+                if self.driver.running(spec):
+                    self.active[model] += 1
+                    self.used[model] = self.clock()
+                    return model
+                if self.observe_only:
+                    raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
+                if self.transitioning:
+                    raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+                # Reserve the one permitted cold transition, then release the
+                # global mutex during slow Docker start/model readiness.
+                self.transitioning.add(model)
+                previous = self.running()
+            try:
+                with self.lock:
+                    self._make_room(model)
+                self.driver.start(spec)
+                deadline = self.clock() + self.start_timeout
+                while self.clock() < deadline:
+                    if self.driver.healthy(spec):
+                        break
+                    time.sleep(0.4)
+                else:
+                    raise AdmissionError(503, 'MODEL_START_TIMEOUT')
+                with self.lock:
+                    self.active[model] += 1
+                    self.used[model] = self.clock()
+                return model
+            except BaseException:
+                with self.lock:
                     try:
-                        self._make_room(model)
-                        self.driver.start(spec)
-                        deadline = self.clock() + self.start_timeout
-                        while self.clock() < deadline:
-                            if self.driver.healthy(spec):
-                                break
-                            time.sleep(0.4)
-                        else:
-                            raise AdmissionError(503,'MODEL_START_TIMEOUT')
-                    except Exception:
-                        try:
-                            if self.driver.running(spec):
-                                self.driver.stop(spec)
-                            for old in previous:
-                                if not self.driver.running(self.specs[old]):
-                                    self.driver.start(self.specs[old])
-                                if not self.driver.running(self.specs[old]):
-                                    raise AdmissionError(503,'ROLLBACK_RESIDENT_NOT_RUNNING')
-                        except Exception as error:
-                            raise AdmissionError(503,'MODEL_START_ROLLBACK_FAILED') from error
-                        raise
-                self.active[model] += 1
-                self.used[model] = self.clock()
-            return model
+                        self._restore_previous(model, previous)
+                    except Exception as error:
+                        raise AdmissionError(503, 'MODEL_START_ROLLBACK_FAILED') from error
+                raise
+            finally:
+                with self.lock:
+                    self.transitioning.discard(model)
         except BaseException:
             self.semaphore.release()
             raise
@@ -323,9 +340,9 @@ class Coordinator:
 
     def reap(self):
         """Reclaim only cold models after their last leased request has finished."""
-        if self.observe_only:
-            return
         with self.lock:
+            if self.observe_only or self.transitioning:
+                return
             for model in self.running():
                 if not self.specs[model]['warm'] and self.active[model] == 0:
                     last = self.used[model]
