@@ -5,14 +5,14 @@ max_active: 2
 idle_seconds: 120
 models:
   granite:
-    gate_port: 18281
+    gate_port: 18181
     warm: false
   qwen3:
-    gate_port: 18282
+    gate_port: 18182
     warm: false
   ministral:
-    gate_port: 18283
+    gate_port: 18183
     warm: false
   coder:
-    gate_port: 18284
+    gate_port: 18184
     warm: false
