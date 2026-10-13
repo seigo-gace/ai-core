@@ -29,14 +29,27 @@ def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--output',required=True); ap.add_argument('--api-key-env',default='LLAMA_SWAP_API_KEY'); ap.add_argument('--peer-target',choices=('backend','gate'),default='backend'); ap.add_argument('--exclusive-traffic',action='store_true'); a=ap.parse_args()
     if a.peer_target == 'gate' and not a.exclusive_traffic:
         ap.error('GATE_PEERS_REQUIRE_EXCLUSIVE_TRAFFIC')
-    ids={name:discover(url) for name,url in BACKENDS}
     if a.peer_target == 'gate':
-        policy=yaml.safe_load((Path(__file__).resolve().parents[2]/'runtime/model-policy.yaml').read_text(encoding='utf-8'))
+        root=Path(__file__).resolve().parents[2]
+        policy=yaml.safe_load((root/'runtime/model-policy.yaml').read_text(encoding='utf-8'))
+        compose=yaml.safe_load((root/'compose.runtime.yml').read_text(encoding='utf-8'))
+        # Gate migration starts with all backends cold. Do not require
+        # four model startups merely to discover model IDs.
+        ids={}
+        for name,_ in BACKENDS:
+            cmd=compose['services'][name]['command']
+            if '-m' not in cmd or cmd.index('-m')+1 >= len(cmd):
+                ap.error('MISSING_COMPOSE_MODEL_ID:'+name)
+            model_id=cmd[cmd.index('-m')+1]
+            if not isinstance(model_id,str) or not model_id.startswith('/models/'):
+                ap.error('INVALID_COMPOSE_MODEL_ID:'+name)
+            ids[name]=model_id
         ports={name: policy['models'][name]['gate_port'] for name,_ in BACKENDS}
         if len(set(ports.values())) != len(BACKENDS) or any(not isinstance(v,int) or not 1024 <= v <= 65535 for v in ports.values()):
             ap.error('INVALID_GATE_PORT_POLICY')
         targets={name: 'http://127.0.0.1:'+str(port) for name,port in ports.items()}
     else:
+        ids={name:discover(url) for name,url in BACKENDS}
         targets=dict(BACKENDS)
     cfg={
       'healthCheckTimeout':120,
