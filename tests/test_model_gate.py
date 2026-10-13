@@ -256,6 +256,29 @@ class CoordinatorTests(unittest.TestCase):
         c.handoff_finish('project-a',ticket=state['ticket'])
         self.assertEqual(d.loaded,{'granite','qwen3'})
 
+    def test_live_parent_budget_denies_third_at_memory_high(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        budget={'parent_memory_max':36*1024**3,
+                'parent_memory_high':34*1024**3,
+                'parent_cpu_cores':6,
+                'selected_memory_ceiling':18*1024**3,
+                'selected_cpu_ceiling':6}
+        process=SimpleNamespace(returncode=0,stdout='/ai.slice/ai-core.slice')
+        real_read=Path.read_text
+        def memory_file(path,*args,**kwargs):
+            if str(path).endswith('/memory.current'):
+                return str(27*1024**3)
+            return real_read(path,*args,**kwargs)
+        with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
+            with patch('runtime.model_gate.subprocess.run',return_value=process):
+                with patch('pathlib.Path.read_text',new=memory_file):
+                    with self.assertRaisesRegex(AdmissionError,'HANDOFF_INSUFFICIENT_LIVE_HEADROOM'):
+                        c.handoff_begin('coder','granite','p')
+        self.assertEqual(d.ops,[])
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+        self.assertIsNone(c.handoff)
+
     def test_handoff_budget_failure_never_starts_third(self):
         d=FakeDriver(('coder','qwen3'))
         def deny():
