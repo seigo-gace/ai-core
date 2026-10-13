@@ -15,13 +15,13 @@ Authority: [採用設計](../docs/DYNAMIC_RESIDENCY_HANDOFF_DESIGN.md) / AI Core
 
 通常のリクエストは 18080互換ルーター → 所有が一意の共通Leaseを通す個別Gate → 既存backend とする。引継ぎbegin/complete/abortは既存のLoopback認証済みGate APIを使い、業務引継ぎ内容は各AI Projectが管理する。ルーターにDocker socketを渡さない。新しい独立Router/Token/Workflow/Managerを作らない。
 
-**重要**：現行 `generate_config.py` は `18081–18084` へ直接peersを生成しており、上記切替は **未実装**。一方、現行 `model_gate.py` は個別Gateポート `18181–18184` と1モデル固有IDを前提にする。既存Routerの `peer` 宛先をGateに変える実装は、4 Gate全稼働、ルーターモデルID保持、ループ・認証転送、404/401/streaming互換、異常時の旧設定復元を確認してから行う。変更前には旧18080で通信する全クライアントと認証方法を調査する。
+**重要**：現行 `generate_config.py` は `18081–18084` へ直接peersを生成しており、上記切替は **未実装**。一方、現行 `model_gate.py` は個別Gateポート `18281–18284` と1モデル固有IDを前提にする。既存Routerの `peer` 宛先をGateに変える実装は、4 Gate全稼働、ルーターモデルID保持、ループ・認証転送、404/401/streaming互換、異常時の旧設定復元を確認してから行う。変更前には旧18080で通信する全クライアントと認証方法を調査する。
 
 ## 切替手順・停止条件
 
 1. 既存Hostの4コンテナとRouter config/systemd/Dockerの所有者、既存18080通信元とAPI契約を採取。Sourceブランチと本番ディレクトリを区別する。
 2. 既存worktree `.worktrees/source-import-20261013` に最新Sourceを取得して隔離検証する。Source取得はRuntime反映ではない。
-3. Gate 4個を同じ共有Coordinatorで起動し、認証・同時処理・model ID互換を実測。現在18181だけListenという以前の実測は、全Gate readiness の証明ではない。
+3. Gate 4個を同じ共有Coordinatorで起動し、認証・同時処理・model ID互換を実測。現在18281だけListenという以前の実測は、全Gate readiness の証明ではない。
 4. 旧RouterのAPIとKey/IDを保持しながら **18080を単一の新入口へ切替**。短時間の接続確認だけを排他証明にせず、旧直通経路を停止/隔離してLease迂回をなくす。切替失敗時は旧config・旧routerへ戻す。
 5. 共有Lease入口を確認した後に、利用中でない2モデルを停止して通常0–2へ。停止前後で親 `memory.current`、backend RSS、Swap、CPU/TTFTを実測。
 6. 一時引継ぎ2→3→2と期限・失敗時の回収を検証。旧モデルに活動Leaseがあれば強制停止せず、適切に再試行。
