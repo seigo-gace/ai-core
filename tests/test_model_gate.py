@@ -244,6 +244,54 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual([op for op,_ in driver.ops if op=='start'],
                          ['start']*4)
 
+    def test_handoff_uses_temporary_third_and_reclaims_old(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        state=c.handoff_begin('coder','granite','project-a',ttl=60)
+        self.assertEqual(state['owner'],'project-a')
+        self.assertEqual(d.loaded,{'coder','qwen3','granite'})
+        with c.lease('qwen3'):
+            with c.lease('granite'):
+                self.assertEqual(len(d.loaded),3)
+        c.handoff_finish('project-a')
+        self.assertEqual(d.loaded,{'qwen3','granite'})
+        self.assertIsNone(c.handoff)
+
+    def test_handoff_abort_and_expiry_reclaim_new_model(self):
+        d=FakeDriver(('coder','qwen3'))
+        now=[100.0]
+        c=Coordinator(specs(),d,clock=lambda:now[0])
+        c.handoff_begin('coder','ministral','project-a',ttl=10)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_IN_PROGRESS'):
+            c.handoff_begin('qwen3','granite','project-b')
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_NOT_OWNED'):
+            c.handoff_finish('project-b')
+        now[0]=111.0
+        self.assertTrue(c.handoff_expire())
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+        self.assertFalse(c.handoff_expire())
+
+    def test_handoff_lease_protects_busy_old_model(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        c.handoff_begin('coder','granite','p')
+        with c.lease('coder'):
+            with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
+                c.handoff_finish('p')
+            self.assertEqual(len(d.loaded),3)
+        c.handoff_finish('p')
+        self.assertEqual(d.loaded,{'qwen3','granite'})
+
+    def test_handoff_denies_legacy_four_and_observe_only(self):
+        d=FakeDriver(specs())
+        c=Coordinator(specs(),d)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_RESIDENCY_NOT_READY'):
+            c.handoff_begin('coder','granite','p')
+        self.assertEqual(d.ops,[])
+        c=Coordinator(specs(),FakeDriver(('coder','qwen3')),observe_only=True)
+        with self.assertRaisesRegex(AdmissionError,'OBSERVE_ONLY_NO_HANDOFF'):
+            c.handoff_begin('coder','granite','p')
+
     def test_reaper_does_not_relaunch_fixed_models(self):
         driver=FakeDriver(('coder',))
         controller=Coordinator(specs(),driver)
