@@ -244,6 +244,18 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual([op for op,_ in driver.ops if op=='start'],
                          ['start']*4)
 
+    def test_handoff_ticket_prevents_cross_project_completion(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d,handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27, 'selected_cpu_ceiling':6})
+        state=c.handoff_begin('coder','granite','project-a')
+        self.assertGreaterEqual(len(state['ticket']),32)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_TICKET_INVALID'):
+            c.handoff_finish('project-a',ticket='invalid')
+        self.assertEqual(d.loaded,{'coder','qwen3','granite'})
+        c.handoff_finish('project-a',ticket=state['ticket'])
+        self.assertEqual(d.loaded,{'granite','qwen3'})
+
     def test_handoff_budget_failure_never_starts_third(self):
         d=FakeDriver(('coder','qwen3'))
         def deny():
