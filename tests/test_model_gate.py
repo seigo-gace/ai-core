@@ -157,6 +157,79 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(c.active['coder'],1)
         self.assertEqual(c.active['coder'],0)
 
+    def test_idle_unload_does_not_hold_lock_for_ready_warm_request(self):
+        stopped=threading.Event()
+        allow_stop=threading.Event()
+        errors=[]
+        class SlowStopDriver(FakeDriver):
+            def stop(self, spec):
+                stopped.set()
+                if not allow_stop.wait(3):
+                    raise TimeoutError('test stop stalled')
+                super().stop(spec)
+        driver=SlowStopDriver(('coder','ministral'))
+        now=[10.0]
+        coordinator=Coordinator(specs(),driver,idle_seconds=10,
+                                clock=lambda:now[0])
+        with coordinator.lease('ministral'):
+            pass
+        now[0]=50.0
+        def maintenance():
+            try:
+                coordinator.reap()
+            except Exception as exc:
+                errors.append(exc)
+        worker=threading.Thread(target=maintenance,daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(stopped.wait(2),'idle unload did not begin')
+            with coordinator.lease('coder'):
+                self.assertEqual(coordinator.active['coder'],1)
+            with self.assertRaisesRegex(AdmissionError,'MODEL_TRANSITION_BUSY'):
+                coordinator.acquire('ministral')
+        finally:
+            allow_stop.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors,[])
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual(coordinator.transitioning,set())
+
+    def test_warm_recovery_does_not_block_other_warm_model(self):
+        started=threading.Event()
+        allow_start=threading.Event()
+        errors=[]
+        class SlowWarmDriver(FakeDriver):
+            def start(self, spec):
+                if spec['service']=='qwen3':
+                    started.set()
+                    if not allow_start.wait(3):
+                        raise TimeoutError('test warm start stalled')
+                super().start(spec)
+        driver=SlowWarmDriver(('coder',))
+        controller=Coordinator(specs(),driver)
+        def maintenance():
+            try:
+                controller.reap()
+            except Exception as exc:
+                errors.append(exc)
+        worker=threading.Thread(target=maintenance,daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2),'warm restore did not begin')
+            with controller.lease('coder'):
+                self.assertEqual(controller.active['coder'],1)
+            with self.assertRaisesRegex(AdmissionError,'MODEL_TRANSITION_BUSY'):
+                controller.acquire('qwen3')
+            self.assertEqual(driver.loaded,{'coder'})
+        finally:
+            allow_start.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors,[])
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual(controller.transitioning,set())
+
     def test_cold_release_and_warm_recovery(self):
         d=FakeDriver(('coder','ministral'))
         now=[100.0]
