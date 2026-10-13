@@ -1,0 +1,12 @@
+FROM debian:bookworm-slim
+ARG LLAMA_SWAP_VERSION=257
+ARG LLAMA_SWAP_SHA256=939cf1ddf9bd2a9859bf67b01f63469ea2a60454e40e24f19325887ad73ffe79
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+ && curl -fL "https://github.com/mostlygeek/llama-swap/releases/download/v${LLAMA_SWAP_VERSION}/llama-swap_${LLAMA_SWAP_VERSION}_linux_amd64.tar.gz" -o /tmp/llama-swap.tgz \
+ && echo "${LLAMA_SWAP_SHA256}  /tmp/llama-swap.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/llama-swap.tgz -C /usr/local/bin \
+ && chmod 0755 /usr/local/bin/llama-swap \
+ && /usr/local/bin/llama-swap -version \
+ && rm /tmp/llama-swap.tgz
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/llama-swap"]
