@@ -373,6 +373,14 @@ class Coordinator:
                 raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
             if len(loaded) + 1 > 3:
                 raise AdmissionError(409, 'HANDOFF_CAPACITY_EXCEEDED')
+            # A third model's configured resource ceiling must fit the
+            # existing parent limits. No budget expansion is permitted.
+            try:
+                budget = verify_parent_budget(self.specs, {'max_resident': 3})
+            except AdmissionError:
+                raise
+            if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
+                raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
                             'expires': self.clock() + ttl}
             self.transitioning.add(target)
