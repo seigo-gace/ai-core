@@ -4,12 +4,14 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from runtime.model_gate import (AdmissionError, Coordinator, load_policy,
+from runtime.model_gate import (AdmissionError, Coordinator, ExistingContainerDriver, load_policy,
     make_handler, model_specs_from_compose, parse_bytes, verify_parent_budget)
 
 
@@ -49,7 +51,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(items['ministral']['backend_port'],18083)
         self.assertEqual(items['coder']['model_id'],
                          '/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf')
-        self.assertEqual(items['qwen3']['memory_limit_bytes'],9216000000)
+        self.assertEqual(items['qwen3']['memory_limit_bytes'],9216*(1024**2))
     def test_duplicate_gate_port_rejected(self):
         text=(ROOT/'runtime/model-policy.yaml').read_text()
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,7 +60,7 @@ class SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'DUPLICATE_GATE_PORT'):
                 load_policy(path)
     def test_memory_input_rejects_invalid_values(self):
-        self.assertEqual(parse_bytes('9216m'),9216000000)
+        self.assertEqual(parse_bytes('9216m'),9216*(1024**2))
         for value in ('0m','max','5g; rm','-1g'):
             with self.assertRaises(ValueError):
                 parse_bytes(value)
@@ -113,6 +115,15 @@ class CoordinatorTests(unittest.TestCase):
             with self.assertRaises(AdmissionError):
                 c.acquire('granite')
         self.assertEqual(d.ops,[])
+    def test_busy_single_model_denied_without_state_loss(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        with c.lease('coder'):
+            with self.assertRaisesRegex(AdmissionError,'MODEL_CONCURRENCY_LIMIT'):
+                c.acquire('coder')
+            self.assertEqual(c.active['coder'],1)
+        self.assertEqual(c.active['coder'],0)
+
     def test_cold_release_and_warm_recovery(self):
         d=FakeDriver(('coder','ministral'))
         now=[100.0]
@@ -144,7 +155,77 @@ class CoordinatorTests(unittest.TestCase):
                 self.assertLessEqual(len(d.loaded),2)
 
 
+    def test_same_model_rejects_parallel_inference(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        with c.lease('coder'):
+            with self.assertRaisesRegex(AdmissionError,'MODEL_CONCURRENCY_LIMIT'):
+                c.acquire('coder')
+            with c.lease('qwen3'):
+                self.assertEqual(c.active['qwen3'],1)
+        self.assertEqual(c.active['coder'],0)
+
+
+class ExistingContainerTests(unittest.TestCase):
+    def setUp(self):
+        self.spec=specs()['coder']
+        self.record={
+            'Name':'/ai-coder','State':{'Running':False},
+            'Config':{'Cmd':['-m','/models/coder.gguf','--cache-ram','4096'],
+                      'Labels':{'com.docker.compose.project':'ai-core',
+                                'com.docker.compose.service':'coder'}},
+            'HostConfig':{'CgroupParent':'ai-core.slice',
+                          'Memory':9216000000,'NanoCpus':3000000000,
+                          'PortBindings':{'8080/tcp':[{'HostIp':'127.0.0.1',
+                                                      'HostPort':'20003'}]}}
+        }
+        self.driver=ExistingContainerDriver(ROOT/'compose.runtime.yml')
+    def test_existing_container_start_never_recreates(self):
+        calls=[]
+        def run(args,**kwargs):
+            calls.append(args)
+            if args[1]=='inspect':
+                return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
+            if args[1]=='start':
+                self.record['State']['Running']=True
+            if args[1]=='stop':
+                self.record['State']['Running']=False
+            return SimpleNamespace(returncode=0,stdout='')
+        with patch('runtime.model_gate.subprocess.run',side_effect=run):
+            self.driver.start(self.spec)
+            self.assertTrue(self.driver.running(self.spec))
+            self.driver.stop(self.spec)
+        self.assertEqual([args[1] for args in calls if args[1] in ('start','stop')],
+                         ['start','stop'])
+        self.assertTrue(all('compose' not in args for args in calls))
+    def test_wrong_parent_or_limits_fail_closed(self):
+        def run(args,**kwargs):
+            return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
+        with patch('runtime.model_gate.subprocess.run',side_effect=run):
+            for field,broken in [('CgroupParent',''),('Memory',0),
+                                 ('NanoCpus',0)]:
+                original=self.record['HostConfig'][field]
+                self.record['HostConfig'][field]=broken
+                try:
+                    with self.assertRaises(AdmissionError):
+                        self.driver.start(self.spec)
+                finally:
+                    self.record['HostConfig'][field]=original
+    def test_container_identity_and_loopback_protected(self):
+        def run(args,**kwargs):
+            return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
+        with patch('runtime.model_gate.subprocess.run',side_effect=run):
+            self.record['HostConfig']['PortBindings']['8080/tcp'][0]['HostIp']='0.0.0.0'
+            with self.assertRaisesRegex(AdmissionError,'LOOPBACK_PORT'):
+                self.driver.running(self.spec)
+            self.record['HostConfig']['PortBindings']['8080/tcp'][0]['HostIp']='127.0.0.1'
+            self.record['Config']['Labels']['com.docker.compose.service']='other'
+            with self.assertRaisesRegex(AdmissionError,'COMPOSE_OWNER'):
+                self.driver.running(self.spec)
+
+
 class GateHttpTests(unittest.TestCase):
+
     def setUp(self):
         self.driver=FakeDriver(('coder',))
         self.coord=Coordinator(specs(),self.driver)
