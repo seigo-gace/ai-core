@@ -52,8 +52,8 @@ class T(unittest.TestCase):
       with self.assertRaises(SystemExit):
         module.main()
     new=build(['--peer-target','gate','--exclusive-traffic'])
-    self.assertEqual(new['peers']['coder']['proxy'],'http://127.0.0.1:18284')
-    self.assertEqual(new['peers']['granite']['proxy'],'http://127.0.0.1:18281')
+    self.assertEqual(new['peers']['coder']['proxy'],'http://127.0.0.1:18184')
+    self.assertEqual(new['peers']['granite']['proxy'],'http://127.0.0.1:18181')
     self.assertEqual(new['models'],{})
     self.assertEqual(new['globalConcurrencyLimit'],2)
     self.assertEqual(new['apiKeys'],old['apiKeys'])
