@@ -26,8 +26,11 @@ def discover(base):
     return data[0]['id']
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--output',required=True); ap.add_argument('--api-key-env',default='LLAMA_SWAP_API_KEY'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--output',required=True); ap.add_argument('--api-key-env',default='LLAMA_SWAP_API_KEY'); ap.add_argument('--peer-target',choices=('backend','gate'),default='backend'); ap.add_argument('--exclusive-traffic',action='store_true'); a=ap.parse_args()
+    if a.peer_target == 'gate' and not a.exclusive_traffic:
+        ap.error('GATE_PEERS_REQUIRE_EXCLUSIVE_TRAFFIC')
     ids={name:discover(url) for name,url in BACKENDS}
+    targets={name: 'http://127.0.0.1:'+str(18181+i) for i,name in enumerate(('granite','qwen3','ministral','coder'))} if a.peer_target=='gate' else dict(BACKENDS)
     cfg={
       'healthCheckTimeout':120,
       'logLevel':'info','logToStdout':'proxy','metricsMaxInMemory':250,'captureBuffer':0,
@@ -37,10 +40,10 @@ def main():
       'apiKeys':[f'${{env.{a.api_key_env}}}'],
       'models':{},
       'peers':{
-        'granite':{'proxy':'http://127.0.0.1:18081','models':[ids['granite']], 'timeouts':{'responseHeader':180}},
-        'qwen3':{'proxy':'http://127.0.0.1:18082','models':[ids['qwen3']], 'timeouts':{'responseHeader':180}},
-        'ministral':{'proxy':'http://127.0.0.1:18083','models':[ids['ministral']], 'timeouts':{'responseHeader':180}},
-        'coder':{'proxy':'http://127.0.0.1:18084','models':[ids['coder']], 'timeouts':{'responseHeader':180}},
+        'granite':{'proxy':targets['granite'],'models':[ids['granite']], 'timeouts':{'responseHeader':180}},
+        'qwen3':{'proxy':targets['qwen3'],'models':[ids['qwen3']], 'timeouts':{'responseHeader':180}},
+        'ministral':{'proxy':targets['ministral'],'models':[ids['ministral']], 'timeouts':{'responseHeader':180}},
+        'coder':{'proxy':targets['coder'],'models':[ids['coder']], 'timeouts':{'responseHeader':180}},
       },
     }
     p=Path(a.output); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(yaml.safe_dump(cfg,sort_keys=False,allow_unicode=True),encoding='utf-8')
