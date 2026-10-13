@@ -147,6 +147,26 @@ class CoordinatorTests(unittest.TestCase):
             c.acquire('granite')
         self.assertEqual(d.loaded,{'coder','qwen3'})
         self.assertEqual(c.active['granite'],0)
+    def test_partial_eviction_failure_restores_previous_residents(self):
+        class StopAckFailure(FakeDriver):
+            fail_once = True
+            def stop(self, spec):
+                super().stop(spec)
+                if self.fail_once:
+                    self.fail_once = False
+                    raise OSError('stop acknowledgment lost after process stopped')
+        driver=StopAckFailure(('coder','qwen3'))
+        controller=Coordinator(specs(),driver)
+        with self.assertRaisesRegex(OSError,'acknowledgment lost'):
+            controller.acquire('granite')
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual(controller.active['granite'],0)
+        self.assertEqual([op for op in driver.ops if op[0]=='start'],
+                         [('start','coder')])
+        # Semaphore is released even when the first transition failed.
+        with controller.lease('qwen3'):
+            self.assertEqual(controller.active['qwen3'],1)
+
     def test_multiple_model_switches_respect_two_resident_limit(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d)
