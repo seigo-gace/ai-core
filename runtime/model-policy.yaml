@@ -9,10 +9,10 @@ models:
     warm: false
   qwen3:
     gate_port: 18182
-    warm: true
+    warm: false
   ministral:
     gate_port: 18183
     warm: false
   coder:
     gate_port: 18184
-    warm: true
+    warm: false
