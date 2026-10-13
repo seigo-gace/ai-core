@@ -34,6 +34,29 @@ class T(unittest.TestCase):
   def test_12_readonly_collector_no_mutation(self):
     p=(ROOT/'scripts/collect_contabo_readonly_baseline.sh').read_text();
     for x in ['docker compose up','docker compose down','systemctl',' install ',' rm ']: self.assertNotIn(x,p)
+  def test_14_legacy_router_gate_peer_switch_requires_exclusivity(self):
+    import importlib.util, sys, tempfile
+    from unittest.mock import patch
+    spec=importlib.util.spec_from_file_location('config_gen',ROOT/'scripts/generate_config.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    def build(extra):
+      with tempfile.TemporaryDirectory() as tmp:
+        output=str(Path(tmp)/'router.yaml')
+        with patch.object(module,'discover',return_value='/models/example.gguf'), patch.object(sys,'argv',['generate_config.py','--output',output]+extra):
+          module.main()
+        return yaml.safe_load(Path(output).read_text())
+    old=build([])
+    self.assertEqual(old['peers']['coder']['proxy'],'http://127.0.0.1:18084')
+    self.assertEqual(old['globalConcurrencyLimit'],2)
+    with patch.object(module,'discover',return_value='/models/example.gguf'),patch.object(sys,'argv',['generate_config.py','--output','unused','--peer-target','gate']):
+      with self.assertRaises(SystemExit):
+        module.main()
+    new=build(['--peer-target','gate','--exclusive-traffic'])
+    self.assertEqual(new['peers']['coder']['proxy'],'http://127.0.0.1:18184')
+    self.assertEqual(new['peers']['granite']['proxy'],'http://127.0.0.1:18181')
+    self.assertEqual(new['models'],{})
+    self.assertEqual(new['globalConcurrencyLimit'],2)
+    self.assertEqual(new['apiKeys'],old['apiKeys'])
   def test_13_resource_policy_is_measured_not_fixed_8cpu_8gb(self):
     p=(ROOT/'scripts/generate_resource_policy.py').read_text(); self.assertNotIn('cpus < 8',p); self.assertNotIn('max(8',p); self.assertIn('0.50',p); self.assertIn('0.60',p)
 if __name__=='__main__': unittest.main(verbosity=2)
