@@ -56,7 +56,7 @@ class SourceTests(unittest.TestCase):
         text=(ROOT/'runtime/model-policy.yaml').read_text()
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'policy.yaml'
-            path.write_text(text.replace('gate_port: 18282','gate_port: 18281'))
+            path.write_text(text.replace('gate_port: 18182','gate_port: 18181'))
             with self.assertRaisesRegex(ValueError,'DUPLICATE_GATE_PORT'):
                 load_policy(path)
     def test_memory_input_rejects_invalid_values(self):
