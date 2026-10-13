@@ -354,7 +354,16 @@ class Coordinator:
             self.release(model)
 
     def _verify_handoff_budget(self):
-        return verify_parent_budget(self.specs, {'max_resident': 3})
+        # Parent CPU quota governs active inference, not the number of
+        # idle-but-resident models during a short handoff.
+        budget = verify_parent_budget(
+            self.specs, {'max_resident': self.max_active})
+        projected = sum(sorted(
+            (item['memory_limit_bytes'] for item in self.specs.values()),
+            reverse=True)[:3])
+        if projected > budget['parent_memory_max']:
+            raise AdmissionError(409, 'HANDOFF_MEMORY_CEILING_EXCEEDED')
+        return {**budget, 'selected_memory_ceiling': projected}
 
     def handoff_begin(self, previous, target, owner, ttl=120):
         """Reserve one temporary third resident; no HTTP/public API implied.
