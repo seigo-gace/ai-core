@@ -279,6 +279,28 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(d.loaded,{'coder','qwen3'})
         self.assertIsNone(c.handoff)
 
+    def test_live_parent_budget_allows_third_with_headroom(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        budget={'parent_memory_max':36*1024**3,
+                'parent_memory_high':34*1024**3,
+                'parent_cpu_cores':6,
+                'selected_memory_ceiling':18*1024**3,
+                'selected_cpu_ceiling':6}
+        process=SimpleNamespace(returncode=0,stdout='/ai.slice/ai-core.slice')
+        original_read=Path.read_text
+        def current_file(path,*args,**kwargs):
+            if str(path).endswith('/memory.current'):
+                return str(18*1024**3)
+            return original_read(path,*args,**kwargs)
+        with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
+            with patch('runtime.model_gate.subprocess.run',return_value=process):
+                with patch('pathlib.Path.read_text',new=current_file):
+                    state=c.handoff_begin('coder','granite','p')
+        self.assertEqual(len(d.loaded),3)
+        c.handoff_finish('p',ticket=state['ticket'])
+        self.assertEqual(d.loaded,{'granite','qwen3'})
+
     def test_handoff_budget_failure_never_starts_third(self):
         d=FakeDriver(('coder','qwen3'))
         def deny():
