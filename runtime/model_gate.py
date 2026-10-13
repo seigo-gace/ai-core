@@ -13,6 +13,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 import signal
 import subprocess
@@ -416,6 +417,7 @@ class Coordinator:
             if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
                 raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
+                            'ticket': secrets.token_urlsafe(32),
                             'expires': self.clock() + ttl}
             self.transitioning.add(target)
         try:
@@ -456,12 +458,14 @@ class Coordinator:
             with self.lock:
                 self.transitioning.discard(target)
 
-    def handoff_finish(self, owner, *, completed=True):
+    def handoff_finish(self, owner, *, completed=True, ticket=None):
         """Finish or cancel; a busy model is never stopped."""
         with self.lock:
             state = self.handoff
             if state is None or state['owner'] != owner:
                 raise AdmissionError(404, 'HANDOFF_NOT_OWNED')
+            if ticket is not None and not hmac.compare_digest(state['ticket'], ticket):
+                raise AdmissionError(403, 'HANDOFF_TICKET_INVALID')
             if self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
             victim = state['from'] if completed else state['to']
@@ -556,6 +560,37 @@ def make_handler(coordinator, model, api_key):
         def do_POST(self):
             if not self._auth():
                 self._send(401,{'error':{'code':'UNAUTHORIZED'}})
+                return
+            if self.path in ('/internal/handoff/begin', '/internal/handoff/complete',
+                             '/internal/handoff/abort'):
+                if coordinator.observe_only:
+                    self._send(409, {'error': {'code': 'OBSERVE_ONLY_NO_HANDOFF'}})
+                    return
+                try:
+                    length = int(self.headers.get('Content-Length', '-1'))
+                    if not 1 <= length <= 4096:
+                        raise AdmissionError(413, 'INVALID_REQUEST_SIZE')
+                    data = json.loads(self.rfile.read(length).decode('utf-8'))
+                    if not isinstance(data, dict):
+                        raise AdmissionError(422, 'INVALID_HANDOFF_REQUEST')
+                    if self.path == '/internal/handoff/begin':
+                        result = coordinator.handoff_begin(
+                            model, data.get('target'), data.get('owner'),
+                            data.get('ttl', 120))
+                        self._send(200, result)
+                    else:
+                        ticket = data.get('ticket')
+                        if not isinstance(ticket, str) or not ticket:
+                            raise AdmissionError(422, 'HANDOFF_TICKET_REQUIRED')
+                        coordinator.handoff_finish(
+                            data.get('owner'),
+                            completed=self.path.endswith('/complete'),
+                            ticket=ticket)
+                        self._send(200, {'handoff': 'finished'})
+                except AdmissionError as error:
+                    self._send(error.status, {'error': {'code': error.code}})
+                except (ValueError, UnicodeDecodeError, TypeError):
+                    self._send(400, {'error': {'code': 'BAD_REQUEST'}})
                 return
             if self.path != '/v1/chat/completions':
                 self._send(404,{'error':{'code':'NOT_FOUND'}})
