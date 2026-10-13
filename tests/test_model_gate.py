@@ -200,6 +200,65 @@ class CoordinatorTests(unittest.TestCase):
         with controller.lease('qwen3'):
             self.assertEqual(controller.active['qwen3'],1)
 
+    def test_ready_warm_model_can_serve_during_cold_load(self):
+        started=threading.Event()
+        ready=threading.Event()
+        error=[]
+        class SlowColdDriver(FakeDriver):
+            def healthy(self, spec):
+                started.set()
+                return ready.is_set()
+        driver=SlowColdDriver(('coder','qwen3'))
+        controller=Coordinator(specs(),driver,start_timeout=15)
+        def cold():
+            try:
+                with controller.lease('granite'):
+                    pass
+            except Exception as exc:
+                error.append(exc)
+        worker=threading.Thread(target=cold,daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2),'cold startup did not begin')
+            before=__import__('time').monotonic()
+            with controller.lease('qwen3'):
+                self.assertEqual(controller.active['qwen3'],1)
+            elapsed=__import__('time').monotonic()-before
+            self.assertLess(elapsed,1.0,'warm request blocked on cold readiness')
+            snapshot=list(driver.ops)
+            controller.reap()
+            self.assertEqual(driver.ops,snapshot,'reaper mutated during transition')
+        finally:
+            ready.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive(),'cold transition did not finish')
+        self.assertEqual(error,[])
+        self.assertEqual(controller.transitioning,set())
+
+    def test_second_cold_load_rejected_while_first_is_pending(self):
+        started=threading.Event()
+        ready=threading.Event()
+        class SlowColdDriver(FakeDriver):
+            def healthy(self, spec):
+                started.set()
+                return ready.is_set()
+        driver=SlowColdDriver(('coder','qwen3'))
+        controller=Coordinator(specs(),driver,start_timeout=15)
+        worker=threading.Thread(target=lambda: controller.acquire('granite'),
+                                daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2))
+            with self.assertRaisesRegex(AdmissionError,'MODEL_TRANSITION_BUSY'):
+                controller.acquire('ministral')
+            self.assertEqual(len(driver.loaded),2)
+        finally:
+            ready.set()
+            worker.join(timeout=3)
+            if controller.active['granite']:
+                controller.release('granite')
+        self.assertEqual(controller.transitioning,set())
+
     def test_multiple_model_switches_respect_two_resident_limit(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d)
