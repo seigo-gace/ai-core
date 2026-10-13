@@ -716,6 +716,22 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(self.driver.loaded,{'granite','qwen3'})
 
+    def test_handoff_status_docker_failure_returns_503_without_killing_gate(self):
+        original=self.coord.running
+        def unavailable():
+            raise AdmissionError(503,'EXISTING_CONTAINER_COMMAND_FAILED')
+        self.coord.running=unavailable
+        try:
+            status,data=self.req('/internal/handoff/status')
+            self.assertEqual(status,503)
+            self.assertEqual(data['error']['code'],
+                             'EXISTING_CONTAINER_COMMAND_FAILED')
+        finally:
+            self.coord.running=original
+        status,data=self.req('/internal/handoff/status')
+        self.assertEqual(status,200)
+        self.assertEqual(data['resident'],['coder'])
+
     def test_handoff_status_is_authenticated_and_private(self):
         self.driver.loaded.add('qwen3')
         self.coord.handoff_budget_check=lambda: {'selected_memory_ceiling':27, 'selected_cpu_ceiling':6}
