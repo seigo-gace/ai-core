@@ -361,7 +361,7 @@ class Coordinator:
             raise AdmissionError(422, 'INVALID_HANDOFF_MODELS')
         if not isinstance(owner, str) or not owner or len(owner) > 128:
             raise AdmissionError(422, 'INVALID_HANDOFF_OWNER')
-        if not isinstance(ttl, (int, float)) or not 1 <= ttl <= 600:
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 1 <= ttl <= 600:
             raise AdmissionError(422, 'INVALID_HANDOFF_TTL')
         with self.lock:
             if self.observe_only:
@@ -577,7 +577,12 @@ def run_servers(coordinator, token, state_dir):
             signal.signal(signal.SIGINT,on_signal)
             signal.signal(signal.SIGTERM,on_signal)
             while not stop.wait(2):
-                coordinator.handoff_expire()
+                try:
+                    coordinator.handoff_expire()
+                except AdmissionError as error:
+                    # Do not terminate the gate while a leased model is busy.
+                    if error.code not in ('HANDOFF_MODEL_LEASED', 'MODEL_TRANSITION_BUSY'):
+                        raise
                 coordinator.reap()
         finally:
             for server in servers:
