@@ -552,12 +552,14 @@ def make_handler(coordinator, model, api_key):
             if self.path == '/internal/handoff/status':
                 with coordinator.lock:
                     handoff = coordinator.handoff
-                    result = {'resident': sorted(coordinator.running()),
-                              'active': dict(coordinator.active),
-                              'handoff': None if handoff is None else {
-                                  'from': handoff['from'],
-                                  'to': handoff['to'],
-                                  'expires': handoff['expires']}}
+                    active = dict(coordinator.active)
+                    summary = None if handoff is None else {
+                        'from': handoff['from'], 'to': handoff['to'],
+                        'expires': handoff['expires']}
+                # Docker inspect can be slow. A monitoring GET must not
+                # hold the global lease lock during that readback.
+                result = {'resident': sorted(coordinator.running()),
+                          'active': active, 'handoff': summary}
                 self._send(200, result)
                 return
             if self.path == '/v1/models':
