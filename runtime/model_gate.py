@@ -66,7 +66,7 @@ def parse_bytes(value):
     match = re.fullmatch(r'([1-9][0-9]*)([kmg])', str(value).lower())
     if not match:
         raise ValueError('INVALID_MEMORY_LIMIT')
-    return int(match.group(1)) * {'k':1000, 'm':1000**2, 'g':1000**3}[match.group(2)]
+    return int(match.group(1)) * {'k':1024, 'm':1024**2, 'g':1024**3}[match.group(2)]
 
 
 def model_specs_from_compose(path, policy):
@@ -143,7 +143,12 @@ def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
             'selected_cpu_ceiling':maximum_cpu}
 
 
-class ComposeDriver:
+class ExistingContainerDriver:
+    """Operate only already provisioned, Compose-owned, admitted containers.
+
+    A Compose 'up' could recreate a backend WITHOUT the separately installed
+    cgroup_parent override; Docker start/stop preserves existing HostConfig.
+    """
     def __init__(self, compose_file, timeout=45):
         self.compose_file = str(Path(compose_file).resolve())
         self.timeout = timeout
@@ -152,18 +157,48 @@ class ComposeDriver:
         result = subprocess.run(['docker', *args], capture_output=True, text=True,
                                 timeout=self.timeout, check=False)
         if result.returncode:
-            raise AdmissionError(503, 'COMPOSE_COMMAND_FAILED')
+            raise AdmissionError(503, 'EXISTING_CONTAINER_COMMAND_FAILED')
         return result.stdout.strip()
 
+    def _inspect(self, spec):
+        try:
+            records = json.loads(self._run('inspect', 'ai-'+spec['service']))
+        except (ValueError, TypeError) as error:
+            raise AdmissionError(503, 'INVALID_DOCKER_INSPECT') from error
+        if not isinstance(records, list) or len(records) != 1:
+            raise AdmissionError(503, 'EXISTING_CONTAINER_MISSING')
+        container = records[0]
+        if container.get('Name') != '/ai-'+spec['service']:
+            raise AdmissionError(409, 'CONTAINER_IDENTITY_MISMATCH')
+        hc = container.get('HostConfig') or {}
+        labels = (container.get('Config') or {}).get('Labels') or {}
+        if labels.get('com.docker.compose.project') != 'ai-core' or labels.get('com.docker.compose.service') != spec['service']:
+            raise AdmissionError(409, 'COMPOSE_OWNER_MISMATCH')
+        if hc.get('CgroupParent') != 'ai-core.slice':
+            raise AdmissionError(409, 'BACKEND_CGROUP_NOT_PROTECTED')
+        if int(hc.get('Memory') or 0) != spec['memory_limit_bytes']:
+            raise AdmissionError(409, 'BACKEND_MEMORY_LIMIT_MISMATCH')
+        if int(hc.get('NanoCpus') or 0) != round(spec['cpu_limit']*1_000_000_000):
+            raise AdmissionError(409, 'BACKEND_CPU_LIMIT_MISMATCH')
+        ports = (hc.get('PortBindings') or {}).get('8080/tcp') or []
+        if (len(ports) != 1 or ports[0].get('HostIp') != '127.0.0.1'
+                or str(ports[0].get('HostPort')) != str(spec['backend_port'])):
+            raise AdmissionError(409, 'BACKEND_LOOPBACK_PORT_MISMATCH')
+        cmd = (container.get('Config') or {}).get('Cmd') or []
+        if '-m' not in cmd or cmd.index('-m')+1 >= len(cmd) or cmd[cmd.index('-m')+1] != spec['model_id']:
+            raise AdmissionError(409, 'BACKEND_MODEL_ID_MISMATCH')
+        return container
+
     def running(self, spec):
-        value = self._run('inspect','--format','{{.State.Running}}','ai-'+spec['service'])
-        return value == 'true'
+        return self._inspect(spec).get('State',{}).get('Running') is True
 
     def start(self, spec):
-        self._run('compose','-f',self.compose_file,'up','-d','--no-deps',spec['service'])
+        if not self.running(spec):
+            self._run('start', 'ai-'+spec['service'])
 
     def stop(self, spec):
-        self._run('compose','-f',self.compose_file,'stop','-t','30',spec['service'])
+        if self.running(spec):
+            self._run('stop', '--time', '30', 'ai-'+spec['service'])
 
     def healthy(self, spec):
         try:
@@ -227,6 +262,10 @@ class Coordinator:
         try:
             with self.lock:
                 spec = self.specs[model]
+                # Existing llama.cpp backends use -np 1; never send two
+                # simultaneous inferences into one model under one lease.
+                if self.active[model]:
+                    raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
                 if not self.driver.running(spec):
                     evicted = self._make_room(model)
                     try:
@@ -417,7 +456,7 @@ def main(argv=None):
     budget = verify_parent_budget(specs,policy)
     print('MODEL_GATE_PARENT_BUDGET=PASS CPU_CORES='+str(budget['parent_cpu_cores'])+
           ' MAX_BYTES='+str(budget['parent_memory_max']))
-    driver = ComposeDriver(args.compose)
+    driver = ExistingContainerDriver(args.compose)
     coordinator = Coordinator(specs,driver,max_loaded=policy['max_resident'],
                               max_active=policy['max_active'],
                               idle_seconds=policy['idle_seconds'])
