@@ -617,6 +617,37 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(self.driver.ops,[])
         self.assertEqual(self.coord.active['coder'],0)
 
+    def test_authenticated_handoff_http_ticket_and_reclaim(self):
+        self.driver.loaded.add('qwen3')
+        self.coord.handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27, 'selected_cpu_ceiling':6}
+        status,_=self.req('/internal/handoff/begin',
+                          {'target':'granite','owner':'p'},auth=False)
+        self.assertEqual(status,401)
+        self.assertEqual(self.driver.ops,[])
+        status,data=self.req('/internal/handoff/begin',
+                             {'target':'granite','owner':'p','ttl':30})
+        self.assertEqual(status,200)
+        ticket=data['ticket']
+        self.assertEqual(len(self.driver.loaded),3)
+        status,data=self.req('/internal/handoff/complete',
+                             {'owner':'p','ticket':'wrong'})
+        self.assertEqual(status,403)
+        self.assertEqual(data['error']['code'],'HANDOFF_TICKET_INVALID')
+        self.assertEqual(len(self.driver.loaded),3)
+        status,_=self.req('/internal/handoff/complete',
+                          {'owner':'p','ticket':ticket})
+        self.assertEqual(status,200)
+        self.assertEqual(self.driver.loaded,{'granite','qwen3'})
+
+    def test_observe_only_disallows_handoff_http(self):
+        self.coord.observe_only=True
+        status,data=self.req('/internal/handoff/begin',
+                             {'target':'granite','owner':'p'})
+        self.assertEqual(status,409)
+        self.assertEqual(data['error']['code'],'OBSERVE_ONLY_NO_HANDOFF')
+        self.assertEqual(self.driver.ops,[])
+
     def test_other_model_and_stream_refused(self):
         for body in ({'model':'/models/wrong.gguf'},
                      {'model':'/models/coder.gguf','stream':True}):
