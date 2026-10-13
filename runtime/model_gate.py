@@ -267,8 +267,12 @@ class Coordinator:
                 if self.active[model]:
                     raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
                 if not self.driver.running(spec):
-                    evicted = self._make_room(model)
+                    # Capture the complete pre-transition resident set BEFORE
+                    # the first eviction; a stop may succeed and then fail
+                    # before _make_room returns its eviction list.
+                    previous = self.running()
                     try:
+                        self._make_room(model)
                         self.driver.start(spec)
                         deadline = self.clock() + self.start_timeout
                         while self.clock() < deadline:
@@ -281,8 +285,11 @@ class Coordinator:
                         try:
                             if self.driver.running(spec):
                                 self.driver.stop(spec)
-                            for old in evicted:
-                                self.driver.start(self.specs[old])
+                            for old in previous:
+                                if not self.driver.running(self.specs[old]):
+                                    self.driver.start(self.specs[old])
+                                if not self.driver.running(self.specs[old]):
+                                    raise AdmissionError(503,'ROLLBACK_RESIDENT_NOT_RUNNING')
                         except Exception as error:
                             raise AdmissionError(503,'MODEL_START_ROLLBACK_FAILED') from error
                         raise
