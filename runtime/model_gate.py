@@ -215,11 +215,12 @@ class ExistingContainerDriver:
 class Coordinator:
     """All model-specific API listeners share one lease/capacity owner."""
     def __init__(self, specs, driver, max_loaded=2, max_active=2, idle_seconds=120,
-                 start_timeout=180, clock=time.monotonic):
+                 start_timeout=180, clock=time.monotonic, observe_only=False):
         if not (1 <= max_loaded <= len(specs) and 1 <= max_active <= max_loaded):
             raise ValueError('INVALID_ADMISSION_LIMITS')
         self.specs, self.driver = specs, driver
         self.max_loaded, self.max_active = max_loaded, max_active
+        self.observe_only = observe_only
         self.idle_seconds, self.start_timeout, self.clock = idle_seconds, start_timeout, clock
         self.lock = threading.RLock()
         self.active = {name:0 for name in specs}
@@ -233,7 +234,7 @@ class Coordinator:
         """Never implicitly kill legacy production processes on gate startup."""
         with self.lock:
             loaded = self.running()
-            if len(loaded) > self.max_loaded:
+            if len(loaded) > self.max_loaded and not self.observe_only:
                 raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
             return loaded
 
@@ -267,6 +268,10 @@ class Coordinator:
                 if self.active[model]:
                     raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
                 if not self.driver.running(spec):
+                    # Compatibility stage: no model lifecycle mutation even
+                    # with four preexisting residents and legacy consumers.
+                    if self.observe_only:
+                        raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
                     # Capture the complete pre-transition resident set BEFORE
                     # the first eviction; a stop may succeed and then fail
                     # before _make_room returns its eviction list.
@@ -318,6 +323,8 @@ class Coordinator:
 
     def reap(self):
         """Reclaim only cold models after their last leased request has finished."""
+        if self.observe_only:
+            return
         with self.lock:
             for model in self.running():
                 if not self.specs[model]['warm'] and self.active[model] == 0:
@@ -445,18 +452,22 @@ def main(argv=None):
     parser.add_argument('--preflight',action='store_true')
     parser.add_argument('--serve',action='store_true')
     parser.add_argument('--exclusive-traffic',action='store_true')
+    parser.add_argument('--observe-only',action='store_true',
+                        help='never start/stop models; allow legacy 4-resident Host')
     parser.add_argument('--state-dir',default='/home/admin1/projects/ai-core/.ai-core')
     args = parser.parse_args(argv)
     if args.preflight == args.serve:
         parser.error('choose exactly one of --preflight or --serve')
+    if args.observe_only and (not args.serve or args.exclusive_traffic):
+        parser.error('--observe-only is a non-mutating --serve mode only')
     policy = load_policy(args.policy)
     specs = model_specs_from_compose(args.compose,policy)
     if args.preflight:
         print('MODEL_GATE_PREFLIGHT=PASS MODEL_COUNT='+str(len(specs))+
               ' PORTS='+','.join(str(x['gate_port']) for x in specs.values()))
         return 0
-    if not args.exclusive_traffic:
-        parser.error('--serve requires --exclusive-traffic and confirmed consumer cutover')
+    if not (args.exclusive_traffic or args.observe_only):
+        parser.error('--serve requires --exclusive-traffic or --observe-only')
     key = os.environ.get('LLAMA_SWAP_API_KEY','')
     if len(key) < 16:
         parser.error('existing LLAMA_SWAP_API_KEY environment must be configured')
@@ -466,7 +477,10 @@ def main(argv=None):
     driver = ExistingContainerDriver(args.compose)
     coordinator = Coordinator(specs,driver,max_loaded=policy['max_resident'],
                               max_active=policy['max_active'],
-                              idle_seconds=policy['idle_seconds'])
+                              idle_seconds=policy['idle_seconds'],
+                              observe_only=args.observe_only)
+    print('MODEL_GATE_MODE='+('OBSERVE_ONLY_NO_LIFECYCLE' if args.observe_only
+                              else 'EXCLUSIVE_RESIDENCY'))
     run_servers(coordinator,key,args.state_dir)
     return 0
 
