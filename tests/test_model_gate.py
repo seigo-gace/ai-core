@@ -157,6 +157,42 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(c.active['coder'],1)
         self.assertEqual(c.active['coder'],0)
 
+    def test_slow_cold_eviction_does_not_block_other_ready_model(self):
+        stopped=threading.Event()
+        allow_stop=threading.Event()
+        errors=[]
+        class SlowEvictionDriver(FakeDriver):
+            def stop(self, spec):
+                stopped.set()
+                if not allow_stop.wait(3):
+                    raise TimeoutError('cold eviction stalled')
+                super().stop(spec)
+        driver=SlowEvictionDriver(('coder','qwen3'))
+        controller=Coordinator(specs(),driver)
+        def cold():
+            try:
+                with controller.lease('granite'):
+                    pass
+            except Exception as exc:
+                errors.append(exc)
+        worker=threading.Thread(target=cold,daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(stopped.wait(2),'eviction did not begin')
+            # Coder is chosen as victim by the existing LRU tie-breaker.
+            # The other resident must remain immediately leasable.
+            with controller.lease('qwen3'):
+                self.assertEqual(controller.active['qwen3'],1)
+            with self.assertRaisesRegex(AdmissionError,'MODEL_TRANSITION_BUSY'):
+                controller.acquire('coder')
+        finally:
+            allow_stop.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors,[])
+        self.assertEqual(controller.transitioning,set())
+        self.assertEqual(len(driver.loaded),2)
+
     def test_idle_unload_does_not_hold_lock_for_ready_warm_request(self):
         stopped=threading.Event()
         allow_stop=threading.Event()
