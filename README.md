@@ -2,6 +2,10 @@
 
 **Source owner:** this repository. **Current runtime source:** `/home/admin1/projects/ai-core` on the existing host until a verified, reversible migration is completed.
 
+## Design authority
+
+**AI Core's adopted design (after the owning design PR is merged to main):** [Dynamic residency, temporary three-model handoff and shared resource reuse](docs/DYNAMIC_RESIDENCY_HANDOFF_DESIGN.md). The document fixes the Master-approved 36 GiB / 6-core ceiling, normally 0–2 variable resident models, and only during bounded handoff up to 3 residents, followed by returning to <=2. The older “two initial warm models” and “always at most two” phrasing below is historical bootstrap context, not superseding authority. Implementation PR #3 must be checked against this design before production cutover.
+
 ## Goal
 
 Make **one model = one independently addressable local API**, reusing the existing four llama.cpp backends instead of forcing every AI product through one four-model endpoint. Preserve the **host-wide AI CPU/RAM budget**, model-level resource ceilings, measured tuning, cgroup v2 protection, validation and rollback. **DebugAI's first acceptance case is four model types, six roles, but only two resident models** with the others available on demand. Do not equate independent APIs with automatic RAM release.
