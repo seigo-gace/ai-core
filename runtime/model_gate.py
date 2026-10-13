@@ -552,6 +552,17 @@ def make_handler(coordinator, model, api_key):
             if not self._auth():
                 self._send(401,{'error':{'code':'UNAUTHORIZED'}})
                 return
+            if self.path == '/internal/handoff/status':
+                with coordinator.lock:
+                    handoff = coordinator.handoff
+                    result = {'resident': sorted(coordinator.running()),
+                              'active': dict(coordinator.active),
+                              'handoff': None if handoff is None else {
+                                  'from': handoff['from'],
+                                  'to': handoff['to'],
+                                  'expires': handoff['expires']}}
+                self._send(200, result)
+                return
             if self.path == '/v1/models':
                 mid = coordinator.specs[model]['model_id']
                 self._send(200,{'object':'list','data':[{'id':mid,'object':'model'}]})
@@ -669,10 +680,11 @@ def run_servers(coordinator, token, state_dir):
             while not stop.wait(2):
                 try:
                     coordinator.handoff_expire()
-                except AdmissionError as error:
-                    # Do not terminate the gate while a leased model is busy.
-                    if error.code not in ('HANDOFF_MODEL_LEASED', 'MODEL_TRANSITION_BUSY'):
-                        raise
+                except AdmissionError:
+                    # A Docker stop failure or leased model must not terminate
+                    # the sole gate process and strand a third resident.
+                    # The reservation stays set, and next tick retries.
+                    pass
                 coordinator.reap()
         finally:
             for server in servers:
