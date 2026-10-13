@@ -231,6 +231,27 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder'})
         self.assertEqual(coordinator.transitioning,set())
 
+    def test_failed_idle_stop_does_not_poison_transition_and_can_retry(self):
+        class TransientStop(FakeDriver):
+            fail=True
+            def stop(self, spec):
+                if self.fail:
+                    raise AdmissionError(503, 'EXISTING_CONTAINER_COMMAND_FAILED')
+                super().stop(spec)
+        d=TransientStop(('coder',))
+        clock=[0.0]
+        c=Coordinator(specs(),d,idle_seconds=10,clock=lambda:clock[0])
+        with c.lease('coder'):
+            pass
+        clock[0]=11.0
+        with self.assertRaisesRegex(AdmissionError,'EXISTING_CONTAINER_COMMAND_FAILED'):
+            c.reap()
+        self.assertEqual(c.transitioning,set())
+        self.assertEqual(d.loaded,{'coder'})
+        d.fail=False
+        c.reap()
+        self.assertEqual(d.loaded,set())
+
     def test_four_models_rotate_through_two_slots_on_demand(self):
         driver=FakeDriver(('coder','qwen3'))
         controller=Coordinator(specs(),driver,idle_seconds=10)
