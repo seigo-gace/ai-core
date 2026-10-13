@@ -66,7 +66,29 @@ def report(compose, policy, driver=None, parent_budget=None):
             detail['error'] = error.code if isinstance(error, AdmissionError) else type(error).__name__
         containers.append(detail)
     errors = [item['model'] for item in containers if item['status'] != 'CONTRACT_PASS']
+    # Compare the current four-backend footprint against the proposed
+    # two-running-model scenario. These are observations/projections, not
+    # evidence that stopping any container has actually reclaimed memory.
+    measured = {v['model']: v.get('memory_current_bytes')
+                for v in containers if v['running']
+                and isinstance(v.get('memory_current_bytes'), int)}
+    memory_comparison = {
+        'source': 'per-container-cgroup-memory.current',
+        'measured_running_models': len(measured),
+        'measured_running_bytes_sum': sum(measured.values()),
+        'target_max_running': policy['max_resident'],
+        'actual_reclaimed_bytes': None,
+        'projection_only': True,
+    }
+    if len(measured) == resident and resident > policy['max_resident']:
+        values = sorted(measured.values())
+        count = policy['max_resident']
+        memory_comparison['projected_retained_range_bytes'] = [
+            sum(values[:count]), sum(values[-count:])]
+        memory_comparison['projected_reclaim_range_bytes'] = [
+            sum(values[:-count]), sum(values[count:])]
     return {
+        'memory_comparison': memory_comparison,
         'schema': 'ai-core/host-readiness/v1',
         'action': 'READ_ONLY',
         'backend_count': len(containers),
