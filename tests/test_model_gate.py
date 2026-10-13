@@ -35,7 +35,7 @@ class FakeDriver:
 def specs():
     return {name:{'service':name,'model_id':'/models/'+name+'.gguf',
       'backend_port':20000+i,'gate_port':21000+i,
-      'warm':name in ('coder','qwen3'),'memory_limit_bytes':9216000000,
+      'warm':False,'memory_limit_bytes':9216000000,
       'cpu_limit':3.0}
       for i,name in enumerate(('granite','qwen3','ministral','coder'))}
 
@@ -45,7 +45,7 @@ class SourceTests(unittest.TestCase):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
         self.assertEqual((policy['max_resident'],policy['max_active']),(2,2))
         self.assertEqual({m for m,x in policy['models'].items() if x['warm']},
-                         {'coder','qwen3'})
+                         set())
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
         self.assertEqual(set(items),set(specs()))
         self.assertEqual(items['ministral']['backend_port'],18083)
@@ -228,45 +228,20 @@ class CoordinatorTests(unittest.TestCase):
             worker.join(timeout=3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors,[])
-        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual(driver.loaded,{'coder'})
         self.assertEqual(coordinator.transitioning,set())
 
-    def test_warm_recovery_does_not_block_other_warm_model(self):
-        started=threading.Event()
-        allow_start=threading.Event()
-        errors=[]
-        class SlowWarmDriver(FakeDriver):
-            def start(self, spec):
-                if spec['service']=='qwen3':
-                    started.set()
-                    if not allow_start.wait(3):
-                        raise TimeoutError('test warm start stalled')
-                super().start(spec)
-        driver=SlowWarmDriver(('coder',))
+    def test_reaper_does_not_relaunch_fixed_models(self):
+        driver=FakeDriver(('coder',))
         controller=Coordinator(specs(),driver)
-        def maintenance():
-            try:
-                controller.reap()
-            except Exception as exc:
-                errors.append(exc)
-        worker=threading.Thread(target=maintenance,daemon=True)
-        worker.start()
-        try:
-            self.assertTrue(started.wait(2),'warm restore did not begin')
-            with controller.lease('coder'):
-                self.assertEqual(controller.active['coder'],1)
-            with self.assertRaisesRegex(AdmissionError,'MODEL_TRANSITION_BUSY'):
-                controller.acquire('qwen3')
-            self.assertEqual(driver.loaded,{'coder'})
-        finally:
-            allow_start.set()
-            worker.join(timeout=3)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(errors,[])
-        self.assertEqual(driver.loaded,{'coder','qwen3'})
-        self.assertEqual(controller.transitioning,set())
+        controller.reap()
+        self.assertEqual(driver.loaded,{'coder'})
+        self.assertEqual(driver.ops,[])
+        with controller.lease('qwen3'):
+            self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual(driver.ops,[('start','qwen3')])
 
-    def test_cold_release_and_warm_recovery(self):
+    def test_idle_release_does_not_autorestore_warm_pair(self):
         d=FakeDriver(('coder','ministral'))
         now=[100.0]
         c=Coordinator(specs(),d,idle_seconds=10,clock=lambda:now[0])
@@ -276,7 +251,7 @@ class CoordinatorTests(unittest.TestCase):
             self.assertIn('ministral',d.loaded)
         now[0]=160.0
         c.reap()
-        self.assertEqual(d.loaded,{'coder','qwen3'})
+        self.assertEqual(d.loaded,{'coder'})
     def test_failed_cold_start_restores_previous_resident(self):
         d=FakeDriver(('coder','qwen3'))
         d.ready=False
