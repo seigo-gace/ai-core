@@ -57,6 +57,21 @@ class T(unittest.TestCase):
     self.assertEqual(new['models'],{})
     self.assertEqual(new['globalConcurrencyLimit'],2)
     self.assertEqual(new['apiKeys'],old['apiKeys'])
+  def test_15_gate_config_is_generated_while_all_backends_stopped(self):
+    import importlib.util,sys,tempfile
+    from unittest.mock import patch
+    spec=importlib.util.spec_from_file_location('config_gen_offline',ROOT/'scripts/generate_config.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory() as tmp:
+      path=str(Path(tmp)/'new-gate.yaml')
+      with patch.object(module,'discover',side_effect=AssertionError('backend must stay stopped')), patch.object(sys,'argv',['generate_config.py','--output',path,'--peer-target','gate','--exclusive-traffic']):
+        module.main()
+      cfg=yaml.safe_load(Path(path).read_text())
+    self.assertEqual(cfg['peers']['granite']['proxy'],'http://127.0.0.1:18181')
+    self.assertEqual(cfg['peers']['coder']['proxy'],'http://127.0.0.1:18184')
+    self.assertEqual(cfg['peers']['coder']['models'],['/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf'])
+    self.assertEqual(cfg['models'],{})
+    self.assertEqual(cfg['globalConcurrencyLimit'],2)
   def test_13_resource_policy_is_measured_not_fixed_8cpu_8gb(self):
     p=(ROOT/'scripts/generate_resource_policy.py').read_text(); self.assertNotIn('cpus < 8',p); self.assertNotIn('max(8',p); self.assertIn('0.50',p); self.assertIn('0.60',p)
 if __name__=='__main__': unittest.main(verbosity=2)
