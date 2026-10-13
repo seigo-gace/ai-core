@@ -249,9 +249,19 @@ class Coordinator:
             if not idle:
                 raise AdmissionError(429, 'ALL_RESIDENT_MODELS_LEASED')
             victim = min(idle,key=lambda m:(self.specs[m]['warm'],self.used[m] or 0,m))
-            self.driver.stop(self.specs[victim])
-            if self.driver.running(self.specs[victim]):
-                raise AdmissionError(503, 'EVICTION_NOT_CONFIRMED')
+            # The cold target is reserved by acquire(). Reserve the victim too:
+            # unrelated ready-model leases must not wait on a slow Docker stop.
+            self.transitioning.add(victim)
+            try:
+                self.lock.release()
+                try:
+                    self.driver.stop(self.specs[victim])
+                    if self.driver.running(self.specs[victim]):
+                        raise AdmissionError(503, 'EVICTION_NOT_CONFIRMED')
+                finally:
+                    self.lock.acquire()
+            finally:
+                self.transitioning.discard(victim)
             evicted.append(victim)
             loaded.remove(victim)
         return evicted
