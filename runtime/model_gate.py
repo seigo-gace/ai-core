@@ -372,6 +372,12 @@ def make_handler(coordinator, model, api_key):
             if self.path != '/v1/chat/completions':
                 self._send(404,{'error':{'code':'NOT_FOUND'}})
                 return
+            # A parallel legacy router holds no model-gate lease. During the
+            # four-resident compatibility stage, probes may inspect /v1/models
+            # but may not dispatch unleased inference to -np 1 backends.
+            if coordinator.observe_only:
+                self._send(409,{'error':{'code':'OBSERVE_ONLY_NO_INFERENCE'}})
+                return
             try:
                 length = int(self.headers.get('Content-Length','-1'))
                 if length < 1 or length > MAX_REQUEST_BYTES:
