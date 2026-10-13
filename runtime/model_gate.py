@@ -215,7 +215,8 @@ class ExistingContainerDriver:
 class Coordinator:
     """All model-specific API listeners share one lease/capacity owner."""
     def __init__(self, specs, driver, max_loaded=2, max_active=2, idle_seconds=120,
-                 start_timeout=180, clock=time.monotonic, observe_only=False):
+                 start_timeout=180, clock=time.monotonic, observe_only=False,
+                 handoff_budget_check=None):
         if not (1 <= max_loaded <= len(specs) and 1 <= max_active <= max_loaded):
             raise ValueError('INVALID_ADMISSION_LIMITS')
         self.specs, self.driver = specs, driver
@@ -228,6 +229,7 @@ class Coordinator:
         self.used = {name:None for name in specs}
         self.semaphore = threading.BoundedSemaphore(max_active)
         self.handoff = None  # bounded, single temporary third-model slot
+        self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
 
     def running(self):
         return {name for name,spec in self.specs.items() if self.driver.running(spec)}
@@ -351,6 +353,9 @@ class Coordinator:
         finally:
             self.release(model)
 
+    def _verify_handoff_budget(self):
+        return verify_parent_budget(self.specs, {'max_resident': 3})
+
     def handoff_begin(self, previous, target, owner, ttl=120):
         """Reserve one temporary third resident; no HTTP/public API implied.
 
@@ -376,7 +381,7 @@ class Coordinator:
             # A third model's configured resource ceiling must fit the
             # existing parent limits. No budget expansion is permitted.
             try:
-                budget = verify_parent_budget(self.specs, {'max_resident': 3})
+                budget = self.handoff_budget_check()
             except AdmissionError:
                 raise
             if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
