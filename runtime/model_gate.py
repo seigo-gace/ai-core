@@ -558,7 +558,15 @@ def make_handler(coordinator, model, api_key):
                         'expires': handoff['expires']}
                 # Docker inspect can be slow. A monitoring GET must not
                 # hold the global lease lock during that readback.
-                result = {'resident': sorted(coordinator.running()),
+                try:
+                    resident = sorted(coordinator.running())
+                except AdmissionError as error:
+                    self._send(error.status, {'error': {'code': error.code}})
+                    return
+                except (OSError, subprocess.TimeoutExpired):
+                    self._send(503, {'error': {'code': 'STATUS_BACKEND_UNAVAILABLE'}})
+                    return
+                result = {'resident': resident,
                           'active': active, 'handoff': summary}
                 self._send(200, result)
                 return
