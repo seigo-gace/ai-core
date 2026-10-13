@@ -692,7 +692,13 @@ def run_servers(coordinator, token, state_dir):
                     # the sole gate process and strand a third resident.
                     # The reservation stays set, and next tick retries.
                     pass
-                coordinator.reap()
+                try:
+                    coordinator.reap()
+                except (AdmissionError, OSError, subprocess.TimeoutExpired):
+                    # A transient Docker failure must not kill the only
+                    # shared gate. Transition markers are cleared by reap().
+                    # The next maintenance cycle retries eligible models.
+                    pass
         finally:
             for server in servers:
                 server.shutdown()
