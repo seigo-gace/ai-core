@@ -730,6 +730,33 @@ class GateHttpTests(unittest.TestCase):
         status,_=self.req('/internal/handoff/abort',{'owner':'p','ticket':created['ticket']})
         self.assertEqual(status,200)
 
+    def test_status_docker_read_does_not_hold_lease_lock(self):
+        started=threading.Event()
+        proceed=threading.Event()
+        baseline=self.driver.running
+        def slow(spec):
+            started.set()
+            if not proceed.wait(3):
+                raise RuntimeError('inspect held too long')
+            return baseline(spec)
+        self.driver.running=slow
+        result=[]
+        worker=threading.Thread(
+            target=lambda: result.append(self.req('/internal/handoff/status')),
+            daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2))
+            # Monitoring must not serialize lease state queries against
+            # slow Docker inspect. We only read the lock-protected lease.
+            with self.coord.lock:
+                self.assertEqual(self.coord.active['coder'],0)
+        finally:
+            proceed.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0][0],200)
+
     def test_observe_only_disallows_handoff_http(self):
         self.coord.observe_only=True
         status,data=self.req('/internal/handoff/begin',
