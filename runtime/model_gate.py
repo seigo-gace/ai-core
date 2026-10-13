@@ -368,7 +368,7 @@ class Coordinator:
                     if last is not None and self.clock() - last >= self.idle_seconds:
                         choice = ('stop', model)
                         break
-                                if choice is None:
+                if choice is None:
                     return
                 action, model = choice
                 self.transitioning.add(model)
