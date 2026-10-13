@@ -1,0 +1,215 @@
+import json
+from pathlib import Path
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib import error, request
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
+from runtime.model_gate import (AdmissionError, Coordinator, load_policy,
+    make_handler, model_specs_from_compose, parse_bytes, verify_parent_budget)
+
+
+class FakeDriver:
+    def __init__(self, running=()):
+        self.loaded=set(running)
+        self.ops=[]
+        self.ready=True
+    def running(self, spec):
+        return spec['service'] in self.loaded
+    def healthy(self, spec):
+        return self.ready
+    def start(self, spec):
+        self.ops.append(('start',spec['service']))
+        self.loaded.add(spec['service'])
+    def stop(self, spec):
+        self.ops.append(('stop',spec['service']))
+        self.loaded.remove(spec['service'])
+
+
+def specs():
+    return {name:{'service':name,'model_id':'/models/'+name+'.gguf',
+      'backend_port':20000+i,'gate_port':21000+i,
+      'warm':name in ('coder','qwen3'),'memory_limit_bytes':9216000000,
+      'cpu_limit':3.0}
+      for i,name in enumerate(('granite','qwen3','ministral','coder'))}
+
+
+class SourceTests(unittest.TestCase):
+    def test_policy_and_four_model_contract(self):
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        self.assertEqual((policy['max_resident'],policy['max_active']),(2,2))
+        self.assertEqual({m for m,x in policy['models'].items() if x['warm']},
+                         {'coder','qwen3'})
+        items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
+        self.assertEqual(set(items),set(specs()))
+        self.assertEqual(items['ministral']['backend_port'],18083)
+        self.assertEqual(items['coder']['model_id'],
+                         '/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf')
+        self.assertEqual(items['qwen3']['memory_limit_bytes'],9216000000)
+    def test_duplicate_gate_port_rejected(self):
+        text=(ROOT/'runtime/model-policy.yaml').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'policy.yaml'
+            path.write_text(text.replace('gate_port: 18182','gate_port: 18181'))
+            with self.assertRaisesRegex(ValueError,'DUPLICATE_GATE_PORT'):
+                load_policy(path)
+    def test_memory_input_rejects_invalid_values(self):
+        self.assertEqual(parse_bytes('9216m'),9216000000)
+        for value in ('0m','max','5g; rm','-1g'):
+            with self.assertRaises(ValueError):
+                parse_bytes(value)
+    def test_existing_parent_budget_preserved(self):
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'ai-core.slice'
+            folder.mkdir()
+            (folder/'memory.max').write_text('36000000000')
+            (folder/'memory.high').write_text('34000000000')
+            (folder/'cpu.max').write_text('600000 100000')
+            budget=verify_parent_budget(items,policy,cgroup_root=Path(tmp),
+                                        control_group='/ai-core.slice')
+            self.assertEqual(budget['parent_cpu_cores'],6)
+            (folder/'cpu.max').write_text('200000 100000')
+            with self.assertRaisesRegex(AdmissionError,'EXCEED_PARENT_BUDGET'):
+                verify_parent_budget(items,policy,cgroup_root=Path(tmp),
+                                     control_group='/ai-core.slice')
+            (folder/'cpu.max').write_text('max 100000')
+            with self.assertRaisesRegex(AdmissionError,'PARENT_BUDGET_UNAVAILABLE'):
+                verify_parent_budget(items,policy,cgroup_root=Path(tmp),
+                                     control_group='/ai-core.slice')
+
+
+class CoordinatorTests(unittest.TestCase):
+    def test_old_four_resident_not_stopped_automatically(self):
+        d=FakeDriver(specs())
+        c=Coordinator(specs(),d)
+        with self.assertRaisesRegex(AdmissionError,'EXISTING_RESIDENCY_EXCEEDS_POLICY'):
+            c.preflight()
+        self.assertEqual(d.ops,[])
+    def test_cold_start_reuses_warm_slot(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        with c.lease('granite'):
+            self.assertEqual(len(d.loaded),2)
+            self.assertIn('granite',d.loaded)
+        self.assertEqual(d.ops[:2],[('stop','coder'),('start','granite')])
+    def test_two_leased_models_do_not_allow_third_request(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        with c.lease('coder'):
+            with c.lease('qwen3'):
+                with self.assertRaisesRegex(AdmissionError,'GLOBAL_CONCURRENCY_LIMIT'):
+                    c.acquire('ministral')
+        self.assertEqual(d.ops,[])
+    def test_one_resident_lease_never_evicted(self):
+        d=FakeDriver(('coder',))
+        c=Coordinator(specs(),d,max_loaded=1,max_active=1)
+        with c.lease('coder'):
+            with self.assertRaises(AdmissionError):
+                c.acquire('granite')
+        self.assertEqual(d.ops,[])
+    def test_cold_release_and_warm_recovery(self):
+        d=FakeDriver(('coder','ministral'))
+        now=[100.0]
+        c=Coordinator(specs(),d,idle_seconds=10,clock=lambda:now[0])
+        with c.lease('ministral'):
+            now[0]=140.0
+            c.reap()
+            self.assertIn('ministral',d.loaded)
+        now[0]=160.0
+        c.reap()
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+    def test_failed_cold_start_restores_previous_resident(self):
+        d=FakeDriver(('coder','qwen3'))
+        d.ready=False
+        ticks=[0]
+        def clock():
+            ticks[0]+=1
+            return ticks[0]
+        c=Coordinator(specs(),d,start_timeout=1,clock=clock)
+        with self.assertRaisesRegex(AdmissionError,'MODEL_START_TIMEOUT'):
+            c.acquire('granite')
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+        self.assertEqual(c.active['granite'],0)
+    def test_multiple_model_switches_respect_two_resident_limit(self):
+        d=FakeDriver(('coder','qwen3'))
+        c=Coordinator(specs(),d)
+        for model in ('ministral','granite','qwen3','coder'):
+            with c.lease(model):
+                self.assertLessEqual(len(d.loaded),2)
+
+
+class GateHttpTests(unittest.TestCase):
+    def setUp(self):
+        self.driver=FakeDriver(('coder',))
+        self.coord=Coordinator(specs(),self.driver)
+        class Backend(BaseHTTPRequestHandler):
+            def log_message(self,*args):
+                pass
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{}')
+            def do_POST(self):
+                data=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                output=json.dumps({'choices':[{'message':{'content':data['model']}}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(output)))
+                self.end_headers()
+                self.wfile.write(output)
+        self.backend=ThreadingHTTPServer(('127.0.0.1',0),Backend)
+        self.coord.specs['coder']['backend_port']=self.backend.server_address[1]
+        self.gate=ThreadingHTTPServer(('127.0.0.1',0),
+                          make_handler(self.coord,'coder','EXISTING_TEST_KEY_12345'))
+        self.threads=[threading.Thread(target=x.serve_forever,daemon=True)
+                      for x in (self.backend,self.gate)]
+        for thread in self.threads:
+            thread.start()
+        self.base='http://127.0.0.1:'+str(self.gate.server_address[1])
+    def tearDown(self):
+        for server in (self.gate,self.backend):
+            server.shutdown()
+            server.server_close()
+        for thread in self.threads:
+            thread.join(timeout=1)
+    def req(self,path,body=None,auth=True):
+        headers={'Content-Type':'application/json'}
+        if auth: headers['Authorization']='Bearer EXISTING_TEST_KEY_12345'
+        r=request.Request(self.base+path,headers=headers,
+                          method='POST' if body is not None else 'GET',
+                          data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with request.urlopen(r,timeout=3) as resp:
+                return resp.status,json.load(resp)
+        except error.HTTPError as exc:
+            return exc.code,json.loads(exc.read())
+    def test_unauthorized(self):
+        status,_=self.req('/v1/models',auth=False)
+        self.assertEqual(status,401)
+    def test_model_id_available_before_loading(self):
+        status,data=self.req('/v1/models')
+        self.assertEqual(status,200)
+        self.assertEqual(data['data'][0]['id'],'/models/coder.gguf')
+    def test_alias_forwarded_as_native_model(self):
+        status,data=self.req('/v1/chat/completions',
+                             {'model':'coder//models/coder.gguf',
+                              'messages':[{'role':'user','content':'ping'}],
+                              'stream':False})
+        self.assertEqual(status,200)
+        self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
+        self.assertEqual(self.coord.active['coder'],0)
+    def test_other_model_and_stream_refused(self):
+        for body in ({'model':'/models/wrong.gguf'},
+                     {'model':'/models/coder.gguf','stream':True}):
+            status,_=self.req('/v1/chat/completions',body)
+            self.assertEqual(status,422)
+        self.assertEqual(self.driver.ops,[])
+
+
+if __name__=='__main__':
+    unittest.main()
