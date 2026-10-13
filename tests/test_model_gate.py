@@ -231,6 +231,19 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder'})
         self.assertEqual(coordinator.transitioning,set())
 
+    def test_four_models_rotate_through_two_slots_on_demand(self):
+        driver=FakeDriver(('coder','qwen3'))
+        controller=Coordinator(specs(),driver,idle_seconds=10)
+        self.assertEqual(len(driver.loaded),2)
+        for requested in ('granite','ministral','coder','qwen3'):
+            with controller.lease(requested):
+                self.assertIn(requested,driver.loaded)
+                self.assertLessEqual(len(driver.loaded),2)
+            self.assertLessEqual(len(driver.loaded),2)
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertEqual([op for op,_ in driver.ops if op=='start'],
+                         ['start']*4)
+
     def test_reaper_does_not_relaunch_fixed_models(self):
         driver=FakeDriver(('coder',))
         controller=Coordinator(specs(),driver)
