@@ -30,7 +30,14 @@ def main():
     if a.peer_target == 'gate' and not a.exclusive_traffic:
         ap.error('GATE_PEERS_REQUIRE_EXCLUSIVE_TRAFFIC')
     ids={name:discover(url) for name,url in BACKENDS}
-    targets={name: 'http://127.0.0.1:'+str(18181+i) for i,name in enumerate(('granite','qwen3','ministral','coder'))} if a.peer_target=='gate' else dict(BACKENDS)
+    if a.peer_target == 'gate':
+        policy=yaml.safe_load((Path(__file__).resolve().parents[2]/'runtime/model-policy.yaml').read_text(encoding='utf-8'))
+        ports={name: policy['models'][name]['gate_port'] for name,_ in BACKENDS}
+        if len(set(ports.values())) != len(BACKENDS) or any(not isinstance(v,int) or not 1024 <= v <= 65535 for v in ports.values()):
+            ap.error('INVALID_GATE_PORT_POLICY')
+        targets={name: 'http://127.0.0.1:'+str(port) for name,port in ports.items()}
+    else:
+        targets=dict(BACKENDS)
     cfg={
       'healthCheckTimeout':120,
       'logLevel':'info','logToStdout':'proxy','metricsMaxInMemory':250,'captureBuffer':0,
