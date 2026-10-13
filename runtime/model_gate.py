@@ -408,19 +408,16 @@ class Coordinator:
                 raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
             if len(loaded) + 1 > 3:
                 raise AdmissionError(409, 'HANDOFF_CAPACITY_EXCEEDED')
-            # A third model's configured resource ceiling must fit the
-            # existing parent limits. No budget expansion is permitted.
-            try:
-                budget = self.handoff_budget_check()
-            except AdmissionError:
-                raise
-            if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
-                raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
+            # Reserve under the mutex; the potentially slow parent cgroup
+            # probe happens after unlocking so ready inference can proceed.
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
                             'ticket': secrets.token_urlsafe(32),
                             'expires': self.clock() + ttl}
             self.transitioning.add(target)
         try:
+            budget = self.handoff_budget_check()
+            if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
+                raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
             self.driver.start(self.specs[target])
             deadline = self.clock() + self.start_timeout
             while self.clock() < deadline:
