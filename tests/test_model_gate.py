@@ -282,6 +282,45 @@ class CoordinatorTests(unittest.TestCase):
         c.handoff_finish('p')
         self.assertEqual(d.loaded,{'qwen3','granite'})
 
+    def test_failed_handoff_stop_preserves_reservation_and_retries(self):
+        class StickyStop(FakeDriver):
+            fail_stop = True
+            def healthy(self, spec):
+                return False if spec['service'] == 'granite' else True
+            def stop(self, spec):
+                if spec['service'] == 'granite' and self.fail_stop:
+                    raise RuntimeError('docker stop unavailable')
+                super().stop(spec)
+        driver=StickyStop(('coder','qwen3'))
+        ticks=[0]
+        def clock():
+            ticks[0]+=1
+            return float(ticks[0])
+        controller=Coordinator(specs(),driver,clock=clock,start_timeout=1)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_ROLLBACK_PENDING'):
+            controller.handoff_begin('coder','granite','project-a')
+        self.assertEqual(driver.loaded,{'coder','qwen3','granite'})
+        self.assertIsNotNone(controller.handoff)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_IN_PROGRESS'):
+            controller.handoff_begin('qwen3','ministral','project-b')
+        driver.fail_stop=False
+        self.assertTrue(controller.handoff_expire())
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        self.assertIsNone(controller.handoff)
+
+    def test_handoff_expired_busy_lease_keeps_reservation(self):
+        d=FakeDriver(('coder','qwen3'))
+        now=[100.0]
+        c=Coordinator(specs(),d,clock=lambda:now[0])
+        c.handoff_begin('coder','granite','project-a',ttl=2)
+        now[0]=103.0
+        with c.lease('granite'):
+            with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
+                c.handoff_expire()
+            self.assertIsNotNone(c.handoff)
+        self.assertTrue(c.handoff_expire())
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+
     def test_handoff_denies_legacy_four_and_observe_only(self):
         d=FakeDriver(specs())
         c=Coordinator(specs(),d)
