@@ -640,6 +640,20 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(self.driver.loaded,{'granite','qwen3'})
 
+    def test_handoff_status_is_authenticated_and_private(self):
+        self.driver.loaded.add('qwen3')
+        self.coord.handoff_budget_check=lambda: {'selected_memory_ceiling':27, 'selected_cpu_ceiling':6}
+        status,created=self.req('/internal/handoff/begin',{'target':'granite','owner':'p'})
+        self.assertEqual(status,200)
+        status,view=self.req('/internal/handoff/status')
+        self.assertEqual(status,200)
+        self.assertNotIn(created['ticket'],json.dumps(view))
+        self.assertEqual(len(view['resident']),3)
+        status,_=self.req('/internal/handoff/status',auth=False)
+        self.assertEqual(status,401)
+        status,_=self.req('/internal/handoff/abort',{'owner':'p','ticket':created['ticket']})
+        self.assertEqual(status,200)
+
     def test_observe_only_disallows_handoff_http(self):
         self.coord.observe_only=True
         status,data=self.req('/internal/handoff/begin',
