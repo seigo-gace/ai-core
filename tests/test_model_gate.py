@@ -301,6 +301,37 @@ class CoordinatorTests(unittest.TestCase):
         c.handoff_finish('p',ticket=state['ticket'])
         self.assertEqual(d.loaded,{'granite','qwen3'})
 
+    def test_slow_handoff_budget_does_not_block_ready_model(self):
+        entered=threading.Event()
+        resume=threading.Event()
+        issues=[]
+        driver=FakeDriver(('coder','qwen3'))
+        def slow_budget():
+            entered.set()
+            if not resume.wait(3):
+                raise TimeoutError('budget check blocked')
+            return {'selected_memory_ceiling':27,'selected_cpu_ceiling':6}
+        c=Coordinator(specs(),driver,handoff_budget_check=slow_budget)
+        def begin():
+            try:
+                c.handoff_begin('coder','granite','project')
+            except Exception as error:
+                issues.append(error)
+        t=threading.Thread(target=begin,daemon=True)
+        t.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            with c.lease('qwen3'):
+                self.assertEqual(c.active['qwen3'],1)
+            self.assertEqual(driver.loaded,{'coder','qwen3'})
+        finally:
+            resume.set()
+            t.join(timeout=3)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(issues,[])
+        self.assertEqual(len(driver.loaded),3)
+        c.handoff_finish('project')
+
     def test_handoff_budget_failure_never_starts_third(self):
         d=FakeDriver(('coder','qwen3'))
         def deny():
