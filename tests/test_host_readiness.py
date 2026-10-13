@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'runtime'))
-from host_readiness import report, MODELS
+from host_readiness import report
 from model_gate import load_policy
 
 
@@ -34,7 +34,7 @@ class TestHostReadiness(unittest.TestCase):
         return report(ROOT/'compose.runtime.yml',self.policy,driver=driver,
                       parent_budget=self.budget)
     def test_four_running_blocks_without_mutation(self):
-        driver=ReadOnlyDriver(MODELS)
+        driver=ReadOnlyDriver(self.policy['models'])
         output=self.run_probe(driver)
         self.assertEqual(output['running_backends'],4)
         self.assertEqual(output['admission'],'BLOCKED')
@@ -53,6 +53,25 @@ class TestHostReadiness(unittest.TestCase):
         self.assertEqual(out['backend_contract_failures'],['ministral'])
         bad=next(x for x in out['models'] if x['model']=='ministral')
         self.assertEqual(bad['error'],'BACKEND_CGROUP_NOT_PROTECTED')
+    def test_non_four_model_registration_is_read_from_policy(self):
+        # No dependency on Granite/Qwen3/Ministral/Coder in the generic
+        # inventory: an admitted AI Core instance may register other names.
+        policy={'max_resident':1,'models':{'research_model':{'warm':True,'gate_port':18190}}}
+        specs={'research_model':{
+            'service':'research_model', 'backend_port':18090, 'gate_port':18190,
+            'warm':True, 'memory_limit_bytes':1024**3, 'cpu_limit':1.0}}
+        driver=ReadOnlyDriver(('research_model',))
+        with patch('host_readiness.model_specs_from_compose',return_value=specs):
+            result=report(ROOT/'compose.runtime.yml',policy,driver=driver,
+                          parent_budget=self.budget)
+        self.assertEqual(result['backend_count'],1)
+        self.assertEqual(result['running_backends'],1)
+        self.assertEqual(result['admission'],'SOURCE_AND_HOST_ONLY')
+        self.assertEqual([item['model'] for item in result['models']],
+                         ['research_model'])
+        self.assertEqual(driver.ops,[('inspect','research_model')])
+        self.assertEqual(result['consumer_exclusivity'],'UNKNOWN')
+
     def test_result_has_no_model_weight_secret_or_host_mutation(self):
         out=self.run_probe(ReadOnlyDriver(('coder',)))
         dumped=json.dumps(out)
