@@ -363,7 +363,27 @@ class Coordinator:
             reverse=True)[:3])
         if projected > budget['parent_memory_max']:
             raise AdmissionError(409, 'HANDOFF_MEMORY_CEILING_EXCEEDED')
-        return {**budget, 'selected_memory_ceiling': projected}
+        # A theoretical 3-container ceiling is insufficient when other
+        # work/cache already occupies the parent. Read live usage before
+        # starting the third backend; keep 1 GiB below the established High.
+        r = subprocess.run(['systemctl', 'show', 'ai-core.slice',
+                            '-p', 'ControlGroup', '--value'],
+                           capture_output=True, text=True, timeout=8)
+        group = r.stdout.strip()
+        if r.returncode or not group.startswith('/') or '..' in Path(group).parts:
+            raise AdmissionError(503, 'HANDOFF_CGROUP_UNAVAILABLE')
+        try:
+            current = int((Path('/sys/fs/cgroup') / group.lstrip('/')
+                           / 'memory.current').read_text().strip())
+        except (OSError, ValueError) as error:
+            raise AdmissionError(503, 'HANDOFF_MEMORY_CURRENT_UNAVAILABLE') from error
+        # A newly started backend can use its entire allowed container
+        # memory even while its initial model weights are loading.
+        largest = max(item['memory_limit_bytes'] for item in self.specs.values())
+        if current + largest + 1024**3 > budget['parent_memory_high']:
+            raise AdmissionError(429, 'HANDOFF_INSUFFICIENT_LIVE_HEADROOM')
+        return {**budget, 'selected_memory_ceiling': projected,
+                'parent_memory_current': current}
 
     def handoff_begin(self, previous, target, owner, ttl=120):
         """Reserve one temporary third resident; no HTTP/public API implied.
