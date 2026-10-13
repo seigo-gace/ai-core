@@ -1,0 +1,44 @@
+services:
+  llama-swap:
+    image: ai-core-llama-swap:v257
+    build:
+      context: .
+      dockerfile: Dockerfile.llama-swap
+    container_name: ai-llama-router
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cpus: "0.50"
+    mem_limit: 256m
+    cgroup_parent: ai-core.slice
+    cpuset: "0-5"
+    memswap_limit: 512m
+    user: "65532:65532"
+    pids_limit: 128
+    environment:
+      LLAMA_SWAP_API_KEY: ${LLAMA_SWAP_API_KEY:?set LLAMA_SWAP_API_KEY}
+    volumes:
+      - ./config/config.generated.yaml:/etc/llama-swap/config.yaml:ro
+    command:
+      - -config
+      - /etc/llama-swap/config.yaml
+      - -listen
+      - 127.0.0.1:18080
+      - -watch-config=false
+    logging:
+      driver: local
+      options:
+        max-size: "1m"
+        max-file: "2"
+        compress: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 10s

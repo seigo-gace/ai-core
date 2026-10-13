@@ -1,0 +1,76 @@
+services:
+  granite:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ai-granite
+    working_dir: /app
+    command: ["-m","/models/granite-4.2-8b-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","0.0.0.0","--port","8080"]
+    environment: [LLAMA_ARG_HOST=0.0.0.0]
+    volumes: ["./models:/models:ro"]
+    ports: ["127.0.0.1:18081:8080"]
+    cpus: 3
+    cpuset: "0-5"
+    mem_limit: 9216m
+    memswap_limit: 14336m
+    restart: unless-stopped
+
+  qwen3:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ai-qwen3
+    working_dir: /app
+    command: ["-m","/models/Qwen3-8B-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","0.0.0.0","--port","8080"]
+    environment: [LLAMA_ARG_HOST=0.0.0.0]
+    volumes: ["./models:/models:ro"]
+    ports: ["127.0.0.1:18082:8080"]
+    cpus: 3
+    cpuset: "0-5"
+    mem_limit: 9216m
+    memswap_limit: 14336m
+    restart: unless-stopped
+
+  ministral:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ai-ministral
+    working_dir: /app
+    command: ["-m","/models/Ministral-3-8B-Reasoning-2512-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","0.0.0.0","--port","8080"]
+    environment: [LLAMA_ARG_HOST=0.0.0.0]
+    volumes: ["./models:/models:ro"]
+    ports: ["127.0.0.1:18083:8080"]
+    cpus: 3
+    cpuset: "0-5"
+    mem_limit: 9216m
+    memswap_limit: 14336m
+    restart: unless-stopped
+
+  coder:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ai-coder
+    working_dir: /app
+    command: ["-m","/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","0.0.0.0","--port","8080"]
+    environment: [LLAMA_ARG_HOST=0.0.0.0]
+    volumes: ["./models:/models:ro"]
+    ports: ["127.0.0.1:18084:8080"]
+    cpus: 3
+    cpuset: "0-5"
+    mem_limit: 9216m
+    memswap_limit: 14336m
+    restart: unless-stopped
+
+  router:
+    profiles: ["legacy-disabled"]
+    image: router-llama-swap
+    container_name: ai-llama-router
+    network_mode: host
+    env_file: ./router/.env.router
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 0.5
+    cpuset: "0-5"
+    mem_limit: 256m
+    memswap_limit: 512m
+    restart: unless-stopped
+    volumes:
+      - ./router/config/config.generated.yaml:/etc/llama-swap/config.yaml:ro
+    command: ["-config","/etc/llama-swap/config.yaml","-listen","127.0.0.1:18080","-watch-config=false"]
