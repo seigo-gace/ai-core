@@ -93,6 +93,39 @@ class CoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(AdmissionError,'EXISTING_RESIDENCY_EXCEEDS_POLICY'):
             c.preflight()
         self.assertEqual(d.ops,[])
+    def test_observe_only_accepts_legacy_four_without_stopping(self):
+        driver=FakeDriver(specs())
+        coordinator=Coordinator(specs(),driver,observe_only=True)
+        self.assertEqual(coordinator.preflight(),set(specs()))
+        with coordinator.lease('qwen3'):
+            self.assertEqual(coordinator.active['qwen3'],1)
+            coordinator.reap()
+        self.assertEqual(driver.ops,[])
+        self.assertEqual(driver.loaded,set(specs()))
+
+    def test_observe_only_denies_cold_load_without_any_mutation(self):
+        driver=FakeDriver(('coder','qwen3'))
+        coordinator=Coordinator(specs(),driver,observe_only=True)
+        self.assertEqual(len(coordinator.preflight()),2)
+        with self.assertRaisesRegex(AdmissionError,'OBSERVE_ONLY_MODEL_NOT_RUNNING'):
+            coordinator.acquire('granite')
+        self.assertEqual(driver.ops,[])
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+        with coordinator.lease('coder'):
+            self.assertEqual(coordinator.active['coder'],1)
+        self.assertEqual(coordinator.active['coder'],0)
+
+    def test_observe_only_reaper_does_not_warm_stopped_services(self):
+        driver=FakeDriver(('ministral',))
+        now=[100.0]
+        coordinator=Coordinator(specs(),driver,observe_only=True,
+                                idle_seconds=10,clock=lambda:now[0])
+        with coordinator.lease('ministral'):
+            now[0]=500.0
+        coordinator.reap()
+        self.assertEqual(driver.loaded,{'ministral'})
+        self.assertEqual(driver.ops,[])
+
     def test_cold_start_reuses_warm_slot(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d)
