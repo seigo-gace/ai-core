@@ -390,12 +390,25 @@ class Coordinator:
                     raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
                 return dict(self.handoff)
         except BaseException:
-            # Start may succeed before health fails. Remove only the new
-            # target and preserve both original residents.
-            if self.driver.running(self.specs[target]):
-                self.driver.stop(self.specs[target])
+            # A failed start can already have made the target resident.
+            # Never forget its reservation until its shutdown is confirmed:
+            # otherwise a later cold start could create a fourth resident.
+            cleanup_ok = False
+            try:
+                if self.driver.running(self.specs[target]):
+                    self.driver.stop(self.specs[target])
+                cleanup_ok = not self.driver.running(self.specs[target])
+            except Exception:
+                pass
             with self.lock:
-                self.handoff = None
+                if cleanup_ok:
+                    self.handoff = None
+                else:
+                    # Keep the admission block; the expiry reaper retries
+                    # cleanup without touching either original resident.
+                    self.handoff['expires'] = self.clock()
+            if not cleanup_ok:
+                raise AdmissionError(503, 'HANDOFF_ROLLBACK_PENDING')
             raise
         finally:
             with self.lock:
