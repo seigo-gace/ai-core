@@ -337,6 +337,20 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
         self.assertEqual(self.coord.active['coder'],0)
+    def test_observe_only_get_is_safe_but_post_denied(self):
+        self.coord.observe_only=True
+        status,data=self.req('/v1/models')
+        self.assertEqual(status,200)
+        self.assertEqual(data['data'][0]['id'],'/models/coder.gguf')
+        status,data=self.req('/v1/chat/completions',
+                             {'model':'/models/coder.gguf',
+                              'messages':[{'role':'user','content':'ping'}],
+                              'stream':False})
+        self.assertEqual(status,409)
+        self.assertEqual(data['error']['code'],'OBSERVE_ONLY_NO_INFERENCE')
+        self.assertEqual(self.driver.ops,[])
+        self.assertEqual(self.coord.active['coder'],0)
+
     def test_other_model_and_stream_refused(self):
         for body in ({'model':'/models/wrong.gguf'},
                      {'model':'/models/coder.gguf','stream':True}):
