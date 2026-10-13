@@ -49,3 +49,15 @@ The new runtime/host_readiness.py is an **explicitly read-only** Host inventory,
 A four-resident production Host must report blocked for two-resident cutover without stopping any model. A source verifier or Host inventory PASS is not an authorization to run gate --serve. No new CI workflow has been introduced.
 
 **NEXT**: source-exact new test suite (now 25 new methods + existing 13) and Host read-only inventory from the existing in-parent checkout; then fix mismatches if any, and separately qualify traffic ownership before admitted live transition.
+
+## 2026-10-13 — Native ChatGPT Host route and two-stage migration
+
+Existing server-core Rule Plane/Work Routine §6 and §9 select registered commands first, then existing `host.command`, then `dev.job` for isolated tests. Fresh normal CHAT native Host receipt [Issue #10 result](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6143098225), from [Actions run](https://github.com/G-ACE-inc/server-core/actions/runs/38380565888), confirms `host.command PASS`, exit 0, exact Host SHA `2b76da06...`, registered source checkout SHA `2955d728...` and four running containers, all `ai-core.slice`, each 9GiB cap. This is real read-only Host evidence, not a deploy.
+
+The 2026-10-13 09:59 UTC Master host inventory reported four idle/current model cgroup counters: total model cgroup `memory.current` **33.30GiB**, selected warm Coder+Qwen3 **15.94GiB**, selected cold Granite+Ministral **17.37GiB**; parent high 34GiB and max 36GiB. The figures are **point-in-time readings**, not measured reclaim or performance evidence; some model cgroup counters may not be disjoint from other components, so do not equate these with total parent consumption. `memory.events.max` values are cumulative, not evidence of new max events during this request; OOM and swap for models reported zero.
+
+**Stage A — OBSERVE-ONLY / non-evicting API compatibility:** `runtime/model_gate.py --serve --observe-only` permits four existing resident backends without automatically starting or stopping any. It uses the same shared Bearer credential, model routing and global request gate. A stopped model returns `OBSERVE_ONLY_MODEL_NOT_RUNNING` without triggering its lifecycle. Stage A *may forward real inference* and therefore is not read-only; it is explicitly NO-LIFECYCLE-MUTATION. Running the Stage A host daemon still needs the already-authorized Host service/runtime admission and proof that local API clients can reach the loopback gates safely. Do not start it merely because Source tests passed.
+
+**Stage B — EXCLUSIVE RESIDENCY:** `--serve --exclusive-traffic` retains the max-2 residency requirement and can evict only registered no-longer-leased models. It must not be enabled until all legacy direct/proxy consumers have migrated or have an independently proven protected exclusion. The flag alone is not proof or permission. Existing 18080 proxy stays available until the owner confirms cutover.
+
+Current revised Source branch needs exact-SHA tests, including the observe-only protection tests. No Host production model was stopped, no external ports/tokens added, and no provider calls made.
