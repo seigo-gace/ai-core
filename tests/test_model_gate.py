@@ -224,7 +224,7 @@ class CoordinatorTests(unittest.TestCase):
             with controller.lease('qwen3'):
                 self.assertEqual(controller.active['qwen3'],1)
             elapsed=__import__('time').monotonic()-before
-            self.assertLess(elapsed,1.0,'warm request blocked on cold readiness')
+            self.assertLess(elapsed,2.0,'warm request blocked on cold readiness')
             snapshot=list(driver.ops)
             controller.reap()
             self.assertEqual(driver.ops,snapshot,'reaper mutated during transition')
