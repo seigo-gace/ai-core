@@ -291,8 +291,8 @@ class Coordinator:
                     raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
                 # Reserve the one permitted cold transition, then release the
                 # global mutex during slow Docker start/model readiness.
-                self.transitioning.add(model)
                 previous = self.running()
+                self.transitioning.add(model)
             try:
                 with self.lock:
                     self._make_room(model)
