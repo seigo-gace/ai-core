@@ -24,3 +24,10 @@ The new tests use local fake backends and do not start Docker. No Host E2E is cl
 First source CI/readback. Then prepare an explicitly admitted, reversible Host rollout preserving legacy router and backends. Benchmark one cold model and then four models under a two-resident policy, including quality, peak RAM, swap, CPU throttling, concurrent requests, restart and rollback. Only afterward switch DebugAI adapter to four independent gates.
 
 GitHub Mission: https://github.com/seigo-gace/ai-core/issues/1
+
+## Source safety review after initial 28-test PASS (2026-10-13)
+- The first exact branch SHA `47e3a785...` passed 15 new and 13 existing tests on the host. This is **source evidence only**, not Host lifecycle or RAM-recovery evidence.
+- A subsequent review found that `docker compose -f compose.runtime.yml up -d SERVICE` can recreate a container without the separately installed backend cgroup override. This would weaken the existing protected CPU/RAM boundary. The model gate now validates Docker Compose labels, model ID, local-only port, `CgroupParent=ai-core.slice`, actual Docker Memory/NanoCpus, and only starts/stops **already created** containers with Docker start/stop; it may not recreate them.
+- Docker's `9216m` matches `9216 * 1024**2` bytes in the observed Host configuration, not decimal `9216 * 1000**2`. Memory comparison corrected. Each `-np 1` backend now allows at most one simultaneous leased inference.
+- The guard changes and added tests on this feature branch **still require fresh exact-HEAD source tests**; prior 28-test PASS does not transfer to the revised code. Use `bash scripts/verify-model-gate-source.sh` in a clean isolated checkout of the actual branch head. This script does not operate Docker.
+- Until verified cutover ownership, the old four resident containers and any unleased traffic must remain untouched. PR stays Draft; production acceptance is **NOT_VERIFIED**.
