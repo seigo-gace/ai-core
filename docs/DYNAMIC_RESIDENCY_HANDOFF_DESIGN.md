@@ -1,6 +1,6 @@
 # AI Core 可変常駐・引継ぎ・共有資源再利用 — 設計正本候補
 
-**Status: PROPOSED_PR (設計専用PR、main採用前)。Owner:** `seigo-gace/ai-core` / Issue #1。  
+**Authority status:** 設計PR #4 のmerge前は `PROPOSED_PR`。GitHub `main` にmergeされた時点から当該 `main` 版を `ADOPTED_MAIN` とする（履歴はPR #4およびmerge commitで追跡）。**Owner:** `seigo-gace/ai-core` / Issue #1。  
 **Masterの確定要件:** 2026-10-13 の会話（通常最大2、引継ぎ時一時3、処理終了後は2以下、既存36GiB/6coreを維持）。  
 **参照した採用設計:** [Notion 改訂F／決定記録](https://app.notion.com/p/3f8cdcf128e4819eb94af16523d8a0b7)。「既存Runtime再利用＋薄い共通資源調停＋モデル別最適化」。  
 **既存実装:** [PR #3](https://github.com/seigo-gace/ai-core/pull/3) は開発中であり、この設計PRのマージ以前に改訂設計の採用証拠としない。
@@ -93,6 +93,6 @@ E. Source/CI PASSはRuntime PASSの代用禁止。実Hostで未測定なら `UNK
 
 ## 9. 設計PR採用手順と権威
 
-本書は**設計だけを変更するPR**として `main` に提案する。Work Routine §6 の `PROPOSED_PR` であり、レビュー前や未マージの段階で `ADOPTED_MAIN` と表現しない。Source PR #3 は設計差分を明記して継続管理する。採用時は設計PRをmainへマージし、READMEに設計正本への参照を置き、AI Core Issue #1 CurrentのDesign revision/実装CUを更新する。その後、PR #3のSource/Testsをこの採用設計へ照合して必要最小限の改修を続ける。
+本書は**設計専用PR #4**として `main` に提案する。Work Routine §6 の `PROPOSED_PR` はPR #4 merge前の状態を指す。`ADOPTED_MAIN` はmerge完了後の `main` 版のみに適用する。Source PR #3 は設計差分を明記して継続管理する。採用時は設計PRをmainへマージし、READMEに設計正本への参照を置き、AI Core Issue #1 CurrentのDesign revision/実装CUを更新する。その後、PR #3のSource/Testsをこの採用設計へ照合して必要最小限の改修を続ける。
 
 **変更権限:** ユーザーによる業務要求は本書の変更理由であって、GitHub/Hostの実行権限を自動拡張しない。
