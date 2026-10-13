@@ -244,9 +244,20 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual([op for op,_ in driver.ops if op=='start'],
                          ['start']*4)
 
+    def test_handoff_budget_failure_never_starts_third(self):
+        d=FakeDriver(('coder','qwen3'))
+        def deny():
+            raise AdmissionError(409, 'HANDOFF_MEMORY_CEILING_EXCEEDED')
+        c=Coordinator(specs(),d,handoff_budget_check=deny)
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_MEMORY_CEILING_EXCEEDED'):
+            c.handoff_begin('coder','granite','project-a')
+        self.assertEqual(d.loaded,{'coder','qwen3'})
+        self.assertEqual(d.ops,[])
+        self.assertIsNone(c.handoff)
+
     def test_handoff_uses_temporary_third_and_reclaims_old(self):
         d=FakeDriver(('coder','qwen3'))
-        c=Coordinator(specs(),d)
+        c=Coordinator(specs(),d,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         state=c.handoff_begin('coder','granite','project-a',ttl=60)
         self.assertEqual(state['owner'],'project-a')
         self.assertEqual(d.loaded,{'coder','qwen3','granite'})
@@ -260,7 +271,7 @@ class CoordinatorTests(unittest.TestCase):
     def test_handoff_abort_and_expiry_reclaim_new_model(self):
         d=FakeDriver(('coder','qwen3'))
         now=[100.0]
-        c=Coordinator(specs(),d,clock=lambda:now[0])
+        c=Coordinator(specs(),d,clock=lambda:now[0],handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         c.handoff_begin('coder','ministral','project-a',ttl=10)
         with self.assertRaisesRegex(AdmissionError,'HANDOFF_IN_PROGRESS'):
             c.handoff_begin('qwen3','granite','project-b')
@@ -273,7 +284,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_handoff_lease_protects_busy_old_model(self):
         d=FakeDriver(('coder','qwen3'))
-        c=Coordinator(specs(),d)
+        c=Coordinator(specs(),d,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         c.handoff_begin('coder','granite','p')
         with c.lease('coder'):
             with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
@@ -296,7 +307,7 @@ class CoordinatorTests(unittest.TestCase):
         def clock():
             ticks[0]+=1
             return float(ticks[0])
-        controller=Coordinator(specs(),driver,clock=clock,start_timeout=1)
+        controller=Coordinator(specs(),driver,clock=clock,start_timeout=1,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         with self.assertRaisesRegex(AdmissionError,'HANDOFF_ROLLBACK_PENDING'):
             controller.handoff_begin('coder','granite','project-a')
         self.assertEqual(driver.loaded,{'coder','qwen3','granite'})
@@ -311,7 +322,7 @@ class CoordinatorTests(unittest.TestCase):
     def test_handoff_expired_busy_lease_keeps_reservation(self):
         d=FakeDriver(('coder','qwen3'))
         now=[100.0]
-        c=Coordinator(specs(),d,clock=lambda:now[0])
+        c=Coordinator(specs(),d,clock=lambda:now[0],handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         c.handoff_begin('coder','granite','project-a',ttl=2)
         now[0]=103.0
         with c.lease('granite'):
@@ -323,7 +334,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_handoff_denies_legacy_four_and_observe_only(self):
         d=FakeDriver(specs())
-        c=Coordinator(specs(),d)
+        c=Coordinator(specs(),d,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         with self.assertRaisesRegex(AdmissionError,'HANDOFF_RESIDENCY_NOT_READY'):
             c.handoff_begin('coder','granite','p')
         self.assertEqual(d.ops,[])
