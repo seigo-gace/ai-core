@@ -227,6 +227,7 @@ class Coordinator:
         self.active = {name:0 for name in specs}
         self.used = {name:None for name in specs}
         self.semaphore = threading.BoundedSemaphore(max_active)
+        self.handoff = None  # bounded, single temporary third-model slot
 
     def running(self):
         return {name for name,spec in self.specs.items() if self.driver.running(spec)}
@@ -241,6 +242,8 @@ class Coordinator:
 
     def _make_room(self, target):
         loaded = self.running()
+        if self.handoff is not None:
+            raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
         evicted = []
         if target in loaded:
             return evicted
@@ -297,7 +300,7 @@ class Coordinator:
                     return model
                 if self.observe_only:
                     raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
-                if self.transitioning:
+                if self.transitioning or self.handoff is not None:
                     raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
                 # Reserve the one permitted cold transition, then release the
                 # global mutex during slow Docker start/model readiness.
@@ -348,6 +351,87 @@ class Coordinator:
         finally:
             self.release(model)
 
+    def handoff_begin(self, previous, target, owner, ttl=120):
+        """Reserve one temporary third resident; no HTTP/public API implied.
+
+        The existing ready model remains usable. A handoff reservation is
+        explicitly owner-bound and short-lived; a second transition is denied.
+        """
+        if previous not in self.specs or target not in self.specs or previous == target:
+            raise AdmissionError(422, 'INVALID_HANDOFF_MODELS')
+        if not isinstance(owner, str) or not owner or len(owner) > 128:
+            raise AdmissionError(422, 'INVALID_HANDOFF_OWNER')
+        if not isinstance(ttl, (int, float)) or not 1 <= ttl <= 600:
+            raise AdmissionError(422, 'INVALID_HANDOFF_TTL')
+        with self.lock:
+            if self.observe_only:
+                raise AdmissionError(409, 'OBSERVE_ONLY_NO_HANDOFF')
+            if self.handoff or self.transitioning:
+                raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
+            loaded = self.running()
+            if previous not in loaded or target in loaded or len(loaded) != self.max_loaded:
+                raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
+            if len(loaded) + 1 > 3:
+                raise AdmissionError(409, 'HANDOFF_CAPACITY_EXCEEDED')
+            self.handoff = {'from': previous, 'to': target, 'owner': owner,
+                            'expires': self.clock() + ttl}
+            self.transitioning.add(target)
+        try:
+            self.driver.start(self.specs[target])
+            deadline = self.clock() + self.start_timeout
+            while self.clock() < deadline:
+                if self.driver.healthy(self.specs[target]):
+                    break
+                time.sleep(0.4)
+            else:
+                raise AdmissionError(503, 'HANDOFF_TARGET_NOT_READY')
+            with self.lock:
+                if len(self.running()) > 3:
+                    raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
+                return dict(self.handoff)
+        except BaseException:
+            # Start may succeed before health fails. Remove only the new
+            # target and preserve both original residents.
+            if self.driver.running(self.specs[target]):
+                self.driver.stop(self.specs[target])
+            with self.lock:
+                self.handoff = None
+            raise
+        finally:
+            with self.lock:
+                self.transitioning.discard(target)
+
+    def handoff_finish(self, owner, *, completed=True):
+        """Finish or cancel; a busy model is never stopped."""
+        with self.lock:
+            state = self.handoff
+            if state is None or state['owner'] != owner:
+                raise AdmissionError(404, 'HANDOFF_NOT_OWNED')
+            if self.transitioning:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            victim = state['from'] if completed else state['to']
+            if self.active[victim]:
+                raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
+            self.transitioning.add(victim)
+        try:
+            self.driver.stop(self.specs[victim])
+            if self.driver.running(self.specs[victim]):
+                raise AdmissionError(503, 'HANDOFF_STOP_NOT_CONFIRMED')
+            with self.lock:
+                self.handoff = None
+        finally:
+            with self.lock:
+                self.transitioning.discard(victim)
+
+    def handoff_expire(self):
+        with self.lock:
+            state = self.handoff
+            if state is None or self.clock() < state['expires']:
+                return False
+            owner = state['owner']
+        self.handoff_finish(owner, completed=False)
+        return True
+
     def reap(self):
         """Reclaim any idle backend without automatically restoring a fixed warm pair.
 
@@ -357,7 +441,7 @@ class Coordinator:
         """
         for _ in range(2 * len(self.specs)):
             with self.lock:
-                if self.observe_only or self.transitioning:
+                if self.observe_only or self.transitioning or self.handoff:
                     return
                 loaded = self.running()
                 choice = None
@@ -493,6 +577,7 @@ def run_servers(coordinator, token, state_dir):
             signal.signal(signal.SIGINT,on_signal)
             signal.signal(signal.SIGTERM,on_signal)
             while not stop.wait(2):
+                coordinator.handoff_expire()
                 coordinator.reap()
         finally:
             for server in servers:
