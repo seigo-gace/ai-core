@@ -339,21 +339,48 @@ class Coordinator:
             self.release(model)
 
     def reap(self):
-        """Reclaim only cold models after their last leased request has finished."""
-        with self.lock:
-            if self.observe_only or self.transitioning:
-                return
-            for model in self.running():
-                if not self.specs[model]['warm'] and self.active[model] == 0:
+        """Reclaim idle cold backends without blocking another ready model.
+
+        A transition is reserved under the lock, but slow Docker stop/start
+        runs outside it. Acquiring the transitioning model fails closed; an
+        already-ready model may still acquire a lease concurrently.
+        """
+        for _ in range(2 * len(self.specs)):
+            with self.lock:
+                if self.observe_only or self.transitioning:
+                    return
+                loaded = self.running()
+                choice = None
+                for model in loaded:
+                    if self.specs[model]['warm'] or self.active[model]:
+                        continue
                     last = self.used[model]
-                    if last is not None and self.clock()-last >= self.idle_seconds:
-                        self.driver.stop(self.specs[model])
-            loaded = self.running()
-            for model in self.specs:
-                if (self.specs[model]['warm'] and model not in loaded
-                        and len(loaded) < self.max_loaded):
-                    self.driver.start(self.specs[model])
-                    loaded.add(model)
+                    if last is not None and self.clock() - last >= self.idle_seconds:
+                        choice = ('stop', model)
+                        break
+                if choice is None and len(loaded) < self.max_loaded:
+                    for model, spec in self.specs.items():
+                        if spec['warm'] and model not in loaded:
+                            choice = ('start', model)
+                            break
+                if choice is None:
+                    return
+                action, model = choice
+                self.transitioning.add(model)
+            try:
+                spec = self.specs[model]
+                if action == 'stop':
+                    self.driver.stop(spec)
+                    if self.driver.running(spec):
+                        raise AdmissionError(503, 'IDLE_STOP_NOT_CONFIRMED')
+                else:
+                    self.driver.start(spec)
+                    if not self.driver.running(spec):
+                        raise AdmissionError(503, 'WARM_RESTORE_NOT_CONFIRMED')
+            finally:
+                with self.lock:
+                    self.transitioning.discard(model)
+        raise AdmissionError(503, 'REAPER_TRANSITION_LIMIT')
 
 
 def make_handler(coordinator, model, api_key):
