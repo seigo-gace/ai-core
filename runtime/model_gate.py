@@ -241,12 +241,6 @@ class Coordinator:
             loaded = self.running()
             if len(loaded) > self.max_loaded and not self.observe_only:
                 raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
-            # An inherited READY resident has an idle clock even before its first request.
-            if not self.observe_only:
-                now = self.clock()
-                for name in loaded:
-                    if self.used[name] is None:
-                        self.used[name] = now
             return loaded
 
     def _make_room(self, target):
@@ -418,7 +412,7 @@ class Coordinator:
             # probe happens after unlocking so ready inference can proceed.
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
                             'ticket': secrets.token_urlsafe(32),
-                            'expires': None, 'ttl_after_ready': ttl}
+                            'expires': self.clock() + ttl}
             self.transitioning.add(target)
         try:
             budget = self.handoff_budget_check()
@@ -435,8 +429,6 @@ class Coordinator:
             with self.lock:
                 if len(self.running()) > 3:
                     raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
-                # Transfer TTL begins only after the target becomes READY.
-                self.handoff['expires'] = self.clock() + self.handoff.pop('ttl_after_ready')
                 return dict(self.handoff)
         except BaseException:
             # A failed start can already have made the target resident.
@@ -490,7 +482,7 @@ class Coordinator:
     def handoff_expire(self):
         with self.lock:
             state = self.handoff
-            if state is None or state['expires'] is None or self.clock() < state['expires']:
+            if state is None or self.clock() < state['expires']:
                 return False
             owner = state['owner']
         self.handoff_finish(owner, completed=False)
