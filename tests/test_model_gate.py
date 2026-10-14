@@ -781,6 +781,12 @@ class GateHttpTests(unittest.TestCase):
                     self.assertEqual(json.load(resp)['choices'][0]['message']['content'],
                                      '/models/' + name + '.gguf')
                 self.assertLessEqual(len(self.driver.loaded), 2)
+                # The server may flush its HTTP response before the handler
+                # releases the Lease in finally; assert bounded eventual
+                # release rather than racing that other thread.
+                deadline = __import__('time').monotonic() + 1
+                while any(self.coord.active.values()) and __import__('time').monotonic() < deadline:
+                    __import__('time').sleep(0.01)
                 self.assertTrue(all(value == 0 for value in self.coord.active.values()))
             self.assertEqual(set(self.coord.specs),
                              {'coder', 'qwen3', 'granite', 'ministral'})
