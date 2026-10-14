@@ -15,7 +15,7 @@ Authority: [採用設計](../docs/DYNAMIC_RESIDENCY_HANDOFF_DESIGN.md) / AI Core
 
 通常のリクエストは 18080互換ルーター → 所有が一意の共通Leaseを通す個別Gate → 既存backend とする。引継ぎbegin/complete/abortは既存のLoopback認証済みGate APIを使い、業務引継ぎ内容は各AI Projectが管理する。ルーターにDocker socketを渡さない。新しい独立Router/Token/Workflow/Managerを作らない。
 
-**重要**：現行 `generate_config.py` は `18081–18084` へ直接peersを生成しており、上記切替は **未実装**。一方、現行 `model_gate.py` は個別Gateポート `18181–18184` と1モデル固有IDを前提にする。既存Routerの `peer` 宛先をGateに変える実装は、4 Gate全稼働、ルーターモデルID保持、ループ・認証転送、404/401/streaming互換、異常時の旧設定復元を確認してから行う。変更前には旧18080で通信する全クライアントと認証方法を調査する。
+**重要**：現行 `generate_config.py` は旧設定との互換のため通常は `18081–18084` を生成するが、`--peer-target gate --exclusive-traffic` 指定時には **18181–18184 のGateを宛先にし、既存 `LLAMA_SWAP_API_KEY` を `peers.*.apiKey` マクロで渡すSource実装がある**。Source生成と認証値構造のテストはPASS。ただしこれだけでは旧18080トラフィックの排他、本番Proxy→Gateでの認証・stream・rollbackは確認されず、**実Hostの切替・実用化は未完了**。一方、現行 `model_gate.py` は個別Gateポート `18181–18184` と1モデル固有IDを前提にする。既存Routerの `peer` 宛先をGateに変える実装は、4 Gate全稼働、ルーターモデルID保持、ループ・認証転送、404/401/streaming互換、異常時の旧設定復元を確認してから行う。変更前には旧18080で通信する全クライアントと認証方法を調査する。
 
 ## 切替手順・停止条件
 
