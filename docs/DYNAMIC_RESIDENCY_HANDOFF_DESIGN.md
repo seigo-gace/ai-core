@@ -135,3 +135,21 @@ E. Source/CI PASSはRuntime PASSの代用禁止。実Hostで未測定なら `UNK
 5. DebugAIの4モデル6役割と独立した第二製品を同時利用し、API品質・公正性・完了時間・製品間隔離を受入。旧方式との性能比較は同じ負荷と測定方法で行う。
 
 **明示的未検証:** 今回はHostモデル起動停止、本番traffic exclusivity、RAM reclaim、SSE本番完結、複数製品E2Eを実行していない。これらをPASSへ昇格させない。
+
+
+## 11. 統合設計比較（2026-10-14、設計審査段階）
+
+評価の目的は、4モデルとDebugAI6役割を維持しつつ、品質合格した開発作業の完了時間・成功率を改善すること。既存API・認証・cgroup・Docker・Coordinatorを最初に棚卸しし、既存改善、OSS部分導入、新規機能、廃止を責務ごとに選ぶ。既存だけに限定せず、白紙の作り直しもしない。
+
+- 維持：既存llama.cpp四モデルと個別API、旧18080互換、認証、cgroup資源境界、DebugAIの業務役割とThinking・Tool品質契約。
+- 改善：Coordinatorのロード予約と推論枠の区別、Queue/Deadline、引継ぎ状態、異常終了後の物理コンテナ再照合、SSE正常終了、初回未利用residentのidle期限、モデル別資源プロファイル。
+- OSS部品として比較：llama-swap v257のcmd/cmdStop/TTL・matrix evict cost・FIFO priority、llama.cppのSleep・KV/cache・slot保存/復元。稼働バージョン、Host権限、品質、CPU・RAMへの適合を見て採用する。現在のRouterはmodels空でLifecycleを所有しないため、無断移管しない。
+- 不足機能の新規構築候補：複数製品で公平な有限Queue、予約の調停、再起動回復、anti-thrashing。既存/OSSに同機能がある場合の重複実装は禁止。
+
+Host実測では4→2停止時に親メモリ使用量が35,564,326,912Bから18,520,264,704Bへ減少した。ただし製品E2Eは未実証。現行Coordinatorは冷起動中に同時推論枠を使用し、DebugAI adapterは呼出しを直列化する。単一モデルのRAM削減だけでは製品全体の処理速度を保証しない。
+
+比較は旧4常駐baseline、既存Coordinator改善、既存OSSの部分再利用、OSSへのLifecycle移管を、同一モデル・品質・負荷条件で評価する。主指標は実仕事完了p50/p95・成功率、cold load、cache、RAM/PSI・CPU、切替失敗、保守費用。
+
+検証は既存server-core共通ターミナルから登録済み隔離コンテナ/開発用dev.jobを優先し、実行権限・稼働契約を確認して進める。隔離Source PASSを本番Runtime PASSと混同しない。0/1/2→3→2、期限・Cancel・再起動、READYモデルへの連座、SSE、二製品の公平性を検証する。現行handoffは起動前にTTLを開始するため、最大180秒の起動待ち後に引継ぎ猶予がなくなり得るが、transition中の停止は既存Guardが拒否する。起動期限と引継ぎ期限の分離を設計候補にする。
+
+現時点は方式の比較設計であり、PR #3実装とHostには変更しない。検証値のない性能改善率は確定しない。
