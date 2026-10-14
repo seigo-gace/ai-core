@@ -43,7 +43,7 @@ def load_policy(path):
     if not isinstance(models, dict) or not models:
         raise ValueError('NO_POLICY_MODELS')
     for model, item in models.items():
-        if not re.fullmatch(r'[a-z][a-z0-9_-]{0,40}', model):
+        if not isinstance(model, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,40}', model):
             raise ValueError('INVALID_SERVICE_NAME')
         if not isinstance(item, dict) or not isinstance(item.get('warm'), bool):
             raise ValueError('INVALID_MODEL_POLICY:' + model)
