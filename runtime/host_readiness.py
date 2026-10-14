@@ -70,7 +70,7 @@ def report(compose, policy, driver=None, parent_budget=None):
     # two-running-model scenario. These are observations/projections, not
     # evidence that stopping any container has actually reclaimed memory.
     measured = {v['model']: v.get('memory_current_bytes')
-                for v in containers if v['running']
+                for v in containers if v.get('running') is True
                 and isinstance(v.get('memory_current_bytes'), int)}
     memory_comparison = {
         'source': 'per-container-cgroup-memory.current',
