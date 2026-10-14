@@ -32,6 +32,32 @@ class GenericModelRegistryTests(unittest.TestCase):
             self.assertLessEqual(len(driver.loaded), 2)
             self.assertIn("gamma", driver.loaded)
 
+    def test_inherited_ready_models_are_eligible_for_idle_reclaim(self):
+        now = [100.0]
+        driver = FakeDriver(("alpha",))
+        control = Coordinator(
+            custom_specs(), driver, max_loaded=2, max_active=2,
+            idle_seconds=10, clock=lambda: now[0],
+        )
+        self.assertEqual(control.preflight(), {"alpha"})
+        self.assertEqual(control.used["alpha"], 100.0)
+        now[0] = 109.0
+        control.reap()
+        self.assertIn("alpha", driver.loaded)
+        now[0] = 111.0
+        control.reap()
+        self.assertNotIn("alpha", driver.loaded)
+
+    def test_observe_only_does_not_schedule_inherited_shutdown(self):
+        driver = FakeDriver(("alpha", "beta", "gamma"))
+        control = Coordinator(
+            custom_specs(), driver, max_loaded=2,
+            max_active=2, observe_only=True,
+        )
+        self.assertEqual(control.preflight(), {"alpha", "beta", "gamma"})
+        self.assertTrue(all(v is None for v in control.used.values()))
+        self.assertEqual(driver.ops, [])
+
     def test_separate_policy_limits_are_not_hardcoded(self):
         entries = custom_specs()
         driver = FakeDriver()
