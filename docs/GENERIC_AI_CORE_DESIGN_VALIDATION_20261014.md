@@ -54,3 +54,9 @@ DebugAIの4モデル・6役割は既存互換と代表検証条件であり、AI
 - 登録済みdev.jobのHost結果通知不達（[Actions](https://github.com/G-ACE-inc/server-core/actions/runs/38517164519)）は検証経路のUNKNOWNであり、Core製品の不合格判定とはしない。
 
 採否が固まるまで本PRを`PROPOSED_PR`として維持する。議論と証拠はIssue #1と既存Notion議事録に継続記録する。
+
+## 会話・設計トレーサビリティ監査
+
+既存main設計§1～14と本PRを照合。主目的＝既存AI Coreの改善・汎用化（§1/14）、Core対製品責務（§3）、既存／OSS／新規の選別（§6/11/14）、現Host固有の0～2・一時3と資源上限（§1～5）、旧API/Lease（§5/10）、冷起動・期限・Handoff・復旧（§10～14）、v257/llama.cppの部分採用（§11/14）、Sourceと実機の証拠分離（§8/12/14）、設計検証と実装の禁止境界（§12/14）には記述がある。
+
+ただし以下は**詳細設計・実証として未完成**：①複数製品共通APIのproduct識別とversion/エラー契約、②可変モデルRegistryとHost Policyの独立性、③load枠・active枠・fair queueの不変条件、④再起動時Lease照合と製品・会話別Cache隔離、⑤現HostのOSS対応実測、⑥独立した二製品での受入試験。DebugAI固有の4モデル/6役割は汎用化の上限ではない。45/45過去Source PASSを最新全体や本番PASSと扱わない。未確定6点をこのDraft内で解消し、完成前にマージ・実装しない。
