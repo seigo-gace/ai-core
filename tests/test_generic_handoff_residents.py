@@ -72,6 +72,24 @@ class GenericHandoffTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder','granite'})
         self.assertIsNone(core.handoff)
 
+    def test_expired_handoff_waits_for_target_lease_before_reclaim(self):
+        from runtime.model_gate import AdmissionError
+        clock=[0]
+        driver=Driver(('coder',))
+        core=Coordinator(specs(),driver,clock=lambda:clock[0],
+                         handoff_budget_check=lambda:
+                         {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
+        state=core.handoff_begin('coder','granite','client',ttl=2)
+        clock[0]=3
+        with core.lease('granite'):
+            with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
+                core.handoff_expire()
+            self.assertEqual(driver.loaded,{'coder','granite'})
+            self.assertIsNotNone(core.handoff)
+        self.assertTrue(core.handoff_expire())
+        self.assertEqual(driver.loaded,{'coder'})
+        self.assertIsNone(core.handoff)
+
     def test_busy_source_rejects_completion_without_stopping(self):
         from runtime.model_gate import AdmissionError
         driver=Driver(('coder','granite'))
