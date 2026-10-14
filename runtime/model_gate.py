@@ -708,9 +708,15 @@ def make_handler(coordinator, model, api_key):
                     finally:
                         conn.close()
             except AdmissionError as error:
-                self._send(error.status,{'error':{'code':error.code}})
+                if not locals().get('stream_headers_sent', False):
+                    self._send(error.status,{'error':{'code':error.code}})
+                else:
+                    self.close_connection = True
             except (ValueError,UnicodeDecodeError):
-                self._send(400,{'error':{'code':'BAD_REQUEST'}})
+                if not locals().get('stream_headers_sent', False):
+                    self._send(400,{'error':{'code':'BAD_REQUEST'}})
+                else:
+                    self.close_connection = True
             except (OSError,TimeoutError,subprocess.TimeoutExpired):
                 # HTTP headers cannot be sent twice after SSE has started.
                 if not locals().get('stream_headers_sent', False):
