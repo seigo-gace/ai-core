@@ -48,17 +48,17 @@ def load_policy(path):
         if not isinstance(item, dict) or not isinstance(item.get('warm'), bool):
             raise ValueError('INVALID_MODEL_POLICY:' + model)
         port = item.get('gate_port')
-        if not isinstance(port, int) or not (1024 <= port <= 65535):
+        if type(port) is not int or not (1024 <= port <= 65535):
             raise ValueError('INVALID_GATE_PORT:' + model)
     ports = [item['gate_port'] for item in models.values()]
     if len(set(ports)) != len(ports):
         raise ValueError('DUPLICATE_GATE_PORT')
     max_loaded, max_active = policy.get('max_resident'), policy.get('max_active')
-    if not (isinstance(max_loaded,int) and isinstance(max_active,int)
+    if not (type(max_loaded) is int and type(max_active) is int
             and 1 <= max_active <= max_loaded <= len(models)):
         raise ValueError('INVALID_ADMISSION_LIMITS')
     idle = policy.get('idle_seconds')
-    if not isinstance(idle,int) or not (10 <= idle <= 3600):
+    if type(idle) is not int or not (10 <= idle <= 3600):
         raise ValueError('INVALID_IDLE_SECONDS')
     return policy
 
