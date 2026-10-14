@@ -72,6 +72,16 @@ class GenericHandoffTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder','granite'})
         self.assertIsNone(core.handoff)
 
+    def test_handoff_retry_does_not_stop_already_absent_victim(self):
+        driver=Driver(('coder','granite'))
+        core=Coordinator(specs(),driver)
+        state=core.handoff_begin('coder','granite','client')
+        driver.loaded.remove('coder')  # prior stop completed; acknowledgement lost
+        core.handoff_finish('client',ticket=state['ticket'])
+        self.assertEqual(driver.ops,[])
+        self.assertEqual(driver.loaded,{'granite'})
+        self.assertIsNone(core.handoff)
+
     def test_expired_handoff_waits_for_target_lease_before_reclaim(self):
         from runtime.model_gate import AdmissionError
         clock=[0]
