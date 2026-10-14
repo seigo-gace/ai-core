@@ -74,7 +74,7 @@ AI Coreは「引継ぎ内容を理解する」必要はない。対象モデル�
 3. **F優先3:** 現行PR #3の薄い共通CoordinatorとAPIを再利用し、固定2絶対上限・固定warm・失敗時rollbackを本設計に従い改修。一時3枠/引継ぎLease/期限/孤立回収/重複防止とメモリ観測を同じOwner内に導入する。各製品に別Managerを作らない。
 4. 実Host影響ゼロでのSourceテストと隔離実装検証。旧18080利用者の排他と可逆移行を実証してから、本番の一時4→通常2、引継ぎ時一時3→通常2を測定。実際のAI製品2種類で同時利用を検証。
 
-## 7. 既存PR #3との確認済み設計差分
+## 7. 既存PR #3との設計差分（初期時点の履歴。最新実装との差分は第10節）
 
 - 現行 `runtime/model-policy.yaml`: `max_resident:2` で**一時3モデルを表現不可**。通常2・引継ぎ一時3・完了後<=2の状態契約が必要。
 - 現行 `runtime/model_gate.py`: `Coordinator` に引継ぎID/所有Project/期限/一時枠/復帰回収がない。通常の単体Leaseと起動停止の一部は再利用可能。
@@ -96,3 +96,42 @@ E. Source/CI PASSはRuntime PASSの代用禁止。実Hostで未測定なら `UNK
 本書は**設計専用PR #4**として `main` に提案する。Work Routine §6 の `PROPOSED_PR` はPR #4 merge前の状態を指す。`ADOPTED_MAIN` はmerge完了後の `main` 版のみに適用する。Source PR #3 は設計差分を明記して継続管理する。採用時は設計PRをmainへマージし、READMEに設計正本への参照を置き、AI Core Issue #1 CurrentのDesign revision/実装CUを更新する。その後、PR #3のSource/Testsをこの採用設計へ照合して必要最小限の改修を続ける。
 
 **変更権限:** ユーザーによる業務要求は本書の変更理由であって、GitHub/Hostの実行権限を自動拡張しない。
+
+
+## 10. 2026-10-14 第二次設計検討 — Runtime安全契約（実装照合後の設計改訂案）
+
+**状態:** 本節は設計改訂PRの審査対象。mainへのmerge前は未採用。第7節の「handoff未実装」等は初期時点の履歴で、現在のPR #3実装の機能不存在を意味しない。実装には `handoff_begin/finish/expire` とSSE forwardingが存在するが、本番E2Eは未検証。過去Sourceテストは同一SHAの証拠だけに紐づける。
+
+### 10.1 一意の資源所有と移行安全性（P0）
+
+- 各backendの実際の推論呼出元（旧18080、個別Gate、直接18081–84、他製品）を全列挙し、全て単一CoordinatorのLeaseを取得することをHostで確認する。認証済みRouterだけでも、backendへの直行経路が残れば排他性は未成立。移行前のStage Aでは推論・停止を実施しない。
+- active=0はCoordinatorが把握したlease数でしかなく、未登録のlegacy利用がある限り停止可否の証明にはならない。単一Ownerと交通切替を実測するまでevictionを禁止する。
+- Gate再起動後はDockerのrunning/healthと自分のin-memory状態の不一致を照合し、未追跡のlease、引継ぎticket、外部使用の可能性が残るときは停止操作をfail-closedとする。lockfileは複数Gateプロセス抑止には有効でも、旧Routerからの直行推論排他の証明ではない。
+
+### 10.2 引継ぎの一般契約（P0）
+
+- `from` と `to` は異なるモデルであり、前後どちらが既にREADYであっても、通常residentが0/1/2のどの状態でも引継ぎ要求を表現できる。新モデル既存residentなら新しい常駐枠を消費しない。必要なときだけ一時枠を使い、常に物理的resident数を正本とする。
+- transitionは予約→資源admission→新側ready→両者の正当利用→完了/中止/期限切れ→安全な回収→通常<=2を一つのtransactionとして扱う。ticketはownerと結びつけて比較し、別製品のleaseを強制解除しない。
+- 実装の `handoff_begin` は現在 `len(loaded)==max_loaded` と `target not in loaded` に限定されるため、この一般契約への差分がある。回収不可のときは予約を保持して再試行し、期限だけを理由に使用中モデルを停止しない。再起動後も未清算の3常駐を見逃さず、実使用が不明なら安全停止ではなく保留扱い。
+
+### 10.3 資源Admissionと公正な実行（P0）
+
+- 親のMemoryHigh34GiB、MemoryMax36GiB、CPU6coreとモデル別制限は不変。起動判断は物理running数、親memory.current/anon/file、memory.events差分、PSI、CPU throttlingと必要予約量の測定を使い、hard ceilingと高圧力下の遅延・拒否を区別する。メモリ計算式のみを実RAM回収実績とは呼ばない。
+- 要求はdeadline/cancelを保持する有限queueを通し、ready-modelへの正常要求をslow start/stopに巻き込まない。製品間に偏った連続選択や飢餓を防ぐが、業務優先度・役割選択は製品側の責務に留める。現行nonblocking semaphoreの429連発はこの設計の完成形ではない。
+- 固定idle 120秒や全モデル同一 `threads3/context8192/cache4096` を最適値としない。cold start頻度・再利用率・p95/TTFT/tokens/sec・処理完了までの総時間・memory/PSIを、DebugAIの複数役割と第二製品の同時負荷で比較して動的policyの閾値を選ぶ。根拠が出るまで既存profileを無断変更しない。
+
+### 10.4 HTTP/streamと製品分離（P1）
+
+- 非stream/stream双方でstatus・error・response schema・tool_calls・JSON/Thinking/finish_reasonを既存consumer契約と照合。SSEは正常終了マーカー確認、upstream非200、途中切断、client disconnect、cancel、deadline、backpressure、上限超過について、200を返したまま正常終了を装わず障害を検出できる仕様とする。
+- 現行SSE転送は総バイト数が `MAX_RESPONSE_BYTES` を超えるとループをbreakし得る。完結性保証の修正とテストが必要。レスポンス取得中のLease保持が存在することと、完結性が証明済みであることは別。
+- Project/tenantを超えるKV・prompt cache共有は誤った文脈混入がないことを前提とし、同一モデルの物理共有と秘密文脈の共有を区別する。AI Coreは技術的隔離と認証、製品はPrompt/Thinking/Toolと意味的引継ぎを所有する。
+
+### 10.5 証拠・受入順序（変更不可）
+
+1. Source最新SHA/既存Router依存/テスト/設計の同時差分確認。設計採用を先行し、実装は既存Draft PR #3内に統合する。
+2. 同一Source SHAでunit/異常系・Host構成の検証。Source/CIのPASSは本番の証明と区別する。
+3. Stage A読取専用Gate/legacy利用者の実測と単一Lease所有を確証。直backendを含む排他不明なら停止・切替を開始しない。
+4. 安全なStage Bで0～2通常運用、必要時のみ一時3→2以下を実Dockerで検証。起動・中断・期限・再起動・rollback・実RAM reclaimの観測値を保存する。
+5. DebugAIの4モデル6役割と独立した第二製品を同時利用し、API品質・公正性・完了時間・製品間隔離を受入。旧方式との性能比較は同じ負荷と測定方法で行う。
+
+**明示的未検証:** 今回はHostモデル起動停止、本番traffic exclusivity、RAM reclaim、SSE本番完結、複数製品E2Eを実行していない。これらをPASSへ昇格させない。
