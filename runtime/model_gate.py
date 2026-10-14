@@ -241,6 +241,13 @@ class Coordinator:
             loaded = self.running()
             if len(loaded) > self.max_loaded and not self.observe_only:
                 raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
+            # Inherited ready residents must enter the same idle TTL policy
+            # as models first loaded by this coordinator.
+            if not self.observe_only:
+                started = self.clock()
+                for name in loaded:
+                    if self.used[name] is None:
+                        self.used[name] = started
             return loaded
 
     def _make_room(self, target):
