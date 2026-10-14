@@ -76,6 +76,20 @@ class SourceTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,error_code):
                         load_policy(path)
 
+    def test_policy_rejects_non_string_model_identifiers(self):
+        import copy
+        import yaml
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'policy.yaml'
+            for bad_key in (True, 42, None):
+                with self.subTest(model_key=repr(bad_key)):
+                    candidate=copy.deepcopy(policy)
+                    candidate['models'][bad_key]=candidate['models'].pop('coder')
+                    path.write_text(yaml.safe_dump(candidate),encoding='utf-8')
+                    with self.assertRaisesRegex(ValueError,'INVALID_SERVICE_NAME'):
+                        load_policy(path)
+
     def test_duplicate_gate_port_rejected(self):
         text=(ROOT/'runtime/model-policy.yaml').read_text()
         with tempfile.TemporaryDirectory() as tmp:
