@@ -57,6 +57,9 @@ class T(unittest.TestCase):
     self.assertEqual(new['models'],{})
     self.assertEqual(new['globalConcurrencyLimit'],2)
     self.assertEqual(new['apiKeys'],old['apiKeys'])
+    self.assertEqual(new['peers']['coder']['apiKey'],'${env.LLAMA_SWAP_API_KEY}')
+    self.assertEqual(new['peers']['granite']['apiKey'],'${env.LLAMA_SWAP_API_KEY}')
+    self.assertNotIn('apiKey',old['peers']['coder'])
   def test_15_gate_config_is_generated_while_all_backends_stopped(self):
     import importlib.util,sys,tempfile
     from unittest.mock import patch
