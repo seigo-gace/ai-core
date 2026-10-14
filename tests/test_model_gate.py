@@ -86,7 +86,7 @@ class SourceTests(unittest.TestCase):
                 with self.subTest(model_key=repr(bad_key)):
                     candidate=copy.deepcopy(policy)
                     candidate['models'][bad_key]=candidate['models'].pop('coder')
-                    path.write_text(yaml.safe_dump(candidate),encoding='utf-8')
+                    path.write_text(yaml.safe_dump(candidate, sort_keys=False),encoding='utf-8')
                     with self.assertRaisesRegex(ValueError,'INVALID_SERVICE_NAME'):
                         load_policy(path)
 
