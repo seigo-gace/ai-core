@@ -655,8 +655,8 @@ class GateHttpTests(unittest.TestCase):
             def do_POST(self):
                 data=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 if data.get('stream') is True:
-                    output=(b'data: {"choices":[{"delta":{"content":"ok"}}]}\\n\\n'
-                            b'data: [DONE]\\n\\n')
+                    output=(b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                            b'data: [DONE]\n\n')
                     self.send_response(200)
                     self.send_header('Content-Type','text/event-stream')
                     self.send_header('Content-Length',str(len(output)))
