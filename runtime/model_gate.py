@@ -486,7 +486,10 @@ class Coordinator:
                 raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
             self.transitioning.add(victim)
         try:
-            self.driver.stop(self.specs[victim])
+            # Recovery is idempotent: a previous stop may have succeeded even
+            # when its confirmation failed. Never stop an already-absent model.
+            if self.driver.running(self.specs[victim]):
+                self.driver.stop(self.specs[victim])
             if self.driver.running(self.specs[victim]):
                 raise AdmissionError(503, 'HANDOFF_STOP_NOT_CONFIRMED')
             with self.lock:
