@@ -66,6 +66,11 @@ def main():
         'coder':{'proxy':targets['coder'],'models':[ids['coder']], 'timeouts':{'responseHeader':180}},
       },
     }
+    if a.peer_target == 'gate':
+        # llama-swap client apiKeys are separate from peer credentials.
+        # Reuse the existing secret macro; never embed or duplicate a key.
+        for peer in cfg['peers'].values():
+            peer['apiKey'] = f'${{env.{a.api_key_env}}}'
     p=Path(a.output); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(yaml.safe_dump(cfg,sort_keys=False,allow_unicode=True),encoding='utf-8')
     print(json.dumps({'status':'PASS','output':str(p),'model_ids':ids},ensure_ascii=False))
 if __name__=='__main__': main()
