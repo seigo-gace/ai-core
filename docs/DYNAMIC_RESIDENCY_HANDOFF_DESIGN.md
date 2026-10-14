@@ -168,3 +168,26 @@ Master指示：検証が必要なら既存サーバー隔離コンテナを使�
 | 製品E2E | DebugAI6役割・別製品、品質/Thinking/Tool/JSON、並列調査と直列後段 | 既存成果品質を維持し、品質合格タスクの完了時間・成功率を比較 |
 
 採否は同一負荷での品質合格率、E2E p50/p95、cold load/TTFT、RAM/CPU・PSI、二製品公平性、維持工数を比較する。受入試験が走らない場合は証拠をNOT_VERIFIEDとし、独立して進められる設計・検証を止めない。設計の詳細選定を終えた時点で本書に方式・根拠・棄却理由を記録し、既存PR #3にだけ実装差分を反映する。設計PRとSource PR、本番反映の状態を混同しない。
+
+
+## 13. 運用アルゴリズム・責務契約（比較対象の具体化）
+
+採用済み条件を壊さない実装候補として次を定義する。これは実行中PR #3への自動採用ではなく、既存実装／OSS機能の比較基準である。
+
+1. **状態の正本**：実コンテナ running・ready 状態、共通Coordinator内のlease、親cgroupの使用量の三つを区別する。プロセス再起動時は物理状態から再照合し、旧利用者や未確認leaseがあれば保守的に停止しない。対象モデルはSTOPPED/STARTING/READY/ACTIVE/IDLE/STOPPING/FAILED/RECOVERINGとする。
+2. **予約と処理を分ける**：ロード用transition予約と、推論実行用active lease（全体2、各Backendの既存np1に従う）を別々に管理する方式を既存semphore方式と比較する。ロード中のREADY requestが無関係に429となる連座を抑える。ただし実CPU6coreとRAM High34GiBの圧迫をなくせるわけではなく実機p95で確認する。
+3. **有限待機と公平性**：製品IDごとの有限Queue・Deadline/Cancel・飢餓防止をCoreが持ち、業務依存関係/役割/意味的優先順位は各製品が所有する。実装候補は公平な製品間ラウンドロビンと製品内FIFO、期限到達で廃棄、READY要求の早期処理。ただし優先順位・予約枠による一製品独占やCold要求永久待機を起こさないテストを必要とする。Queueを追加する前に既存v257 FIFO/priority機構でどこまで責務を満たせるか比較する。
+4. **退避判断**：active leaseや移行予約が存在するモデルを停止しない。現行のwarm/used選択と、v257のevict_cost思想を取り入れた「再ロード費、Prefix再計算費、要求頻度、RAM圧力」の合成を同じトレースで比較する。TTL120秒を根拠なしに最適値としない。OS page cache、weights、KV、prompt cacheのどれを保持・解放するか区別する。
+5. **引継ぎ**：モデルのstart/readiness期限と、READY後に製品が意味情報を受け渡すtransfer期限を別の時計にする。旧/新が既にREADYの場合、通常1→2、通常2→一時3→2、abort、期限切れ、外部製品の正当leaseがある場合を網羅する。現行実装はtransitioning guardが起動中停止を拒否するため、それを再利用する。
+6. **認証と互換性**：旧18080→認証済み個別Gate→既存Backendの経路を用い、モデルID・Thinking・JSON・Tool・Streamingを壊さない。旧18080/直接18081–84からのunleased経路が残る限りリソース制限が完全と呼べない。SSEでの上限超・中断は正常完了扱いしない。
+7. **適応Policyの範囲**：モデルごとのthread、context、KV型、cache、Sleep、Slot復元などOSS設定で実現できる機能を優先し、製品のPrompt内容そのものをCoreで書換えない。性能や精度の改善が確認されない研究技術は採用せず記録を残す。
+
+### 技術採否の暫定判定
+
+- **今から再利用する土台**：既存4 Backend／Docker／cgroup／Gate／Coordinator／旧互換Router。
+- **既存改良の最初の対象**：cold load中のglobal実行枠、状態の復旧、TTLとHandoffの時間契約、SSE終端、単一入口の排他。
+- **OSS採用候補であり未決定**：v257退避コスト・FIFO、llama.cpp idle sleep、KV/slot cache、N-gram speculation。Host実版と品質/CPU性能を確認するまでは切替禁止。
+- **必要なら新規に設ける部分**：製品間Fair Queue、復旧ジャーナル、ロード予約、適応TTL。独立した巨大Managerや追加Repoを作らず、現在の共通Coreへ責務を統合する。
+- **現段階で退ける案**：現行エンジンを丸ごと作り直す、GPU研究の倍率をCPU Hostへ外挿して採用する、4モデルや6役割を減らして見かけの性能を上げる、認証経路を迂回して直接Backendを共通制御の代用とする。
+
+設計上の優先順は「利用者の機能・互換復帰と単一Lease」→「実仕事の並列/待機改善」→「モデル別profileとCache/Sleepの実測比較」→「構成の固定採用」である。小さなSourceテストがPASSしても、製品E2Eや実RAM改善とは別の証拠として扱う。
