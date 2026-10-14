@@ -709,6 +709,49 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
         self.assertEqual(self.coord.active['coder'],0)
+    def test_four_existing_model_apis_share_one_coordinator(self):
+        # Four model-local gates, not four independent resource managers.
+        # Reuse the same mocked backend while verifying model IDs,
+        # auth, capacity, and per-model OpenAI-compatible requests.
+        ports = []
+        for name in ('granite', 'qwen3', 'ministral'):
+            self.coord.specs[name]['backend_port'] = self.backend.server_address[1]
+            gate = ThreadingHTTPServer(
+                ('127.0.0.1', 0),
+                make_handler(self.coord, name, 'EXISTING_TEST_KEY_12345'))
+            worker = threading.Thread(target=gate.serve_forever, daemon=True)
+            worker.start()
+            ports.append((name, gate, worker))
+        try:
+            all_gates = [('coder', self.gate)] + [(name, gate) for name, gate, _ in ports]
+            for name, gate in all_gates:
+                base = 'http://127.0.0.1:' + str(gate.server_address[1])
+                headers = {'Authorization': 'Bearer EXISTING_TEST_KEY_12345',
+                           'Content-Type': 'application/json'}
+                with request.urlopen(request.Request(
+                        base + '/v1/models', headers=headers), timeout=3) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(json.load(resp)['data'][0]['id'],
+                                     '/models/' + name + '.gguf')
+                data = json.dumps({'model': '/models/' + name + '.gguf',
+                                   'messages': [{'role': 'user', 'content': 'ping'}],
+                                   'stream': False}).encode()
+                with request.urlopen(request.Request(
+                        base + '/v1/chat/completions',
+                        headers=headers, data=data, method='POST'), timeout=3) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(json.load(resp)['choices'][0]['message']['content'],
+                                     '/models/' + name + '.gguf')
+                self.assertLessEqual(len(self.driver.loaded), 2)
+                self.assertTrue(all(value == 0 for value in self.coord.active.values()))
+            self.assertEqual(set(self.coord.specs),
+                             {'coder', 'qwen3', 'granite', 'ministral'})
+        finally:
+            for _, gate, worker in ports:
+                gate.shutdown()
+                gate.server_close()
+                worker.join(timeout=1)
+
     def test_observe_only_get_is_safe_but_post_denied(self):
         self.coord.observe_only=True
         status,data=self.req('/v1/models')
