@@ -654,6 +654,15 @@ class GateHttpTests(unittest.TestCase):
                 self.wfile.write(b'{}')
             def do_POST(self):
                 data=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                if data.get('stream') is True:
+                    output=(b'data: {"choices":[{"delta":{"content":"ok"}}]}\\n\\n'
+                            b'data: [DONE]\\n\\n')
+                    self.send_response(200)
+                    self.send_header('Content-Type','text/event-stream')
+                    self.send_header('Content-Length',str(len(output)))
+                    self.end_headers()
+                    self.wfile.write(output)
+                    return
                 output=json.dumps({'choices':[{'message':{'content':data['model']}}]}).encode()
                 self.send_response(200)
                 self.send_header('Content-Length',str(len(output)))
@@ -802,12 +811,26 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(data['error']['code'],'OBSERVE_ONLY_NO_HANDOFF')
         self.assertEqual(self.driver.ops,[])
 
-    def test_other_model_and_stream_refused(self):
+    def test_other_model_and_invalid_stream_rejected(self):
         for body in ({'model':'/models/wrong.gguf'},
-                     {'model':'/models/coder.gguf','stream':True}):
+                     {'model':'/models/coder.gguf','stream':'yes'}):
             status,_=self.req('/v1/chat/completions',body)
             self.assertEqual(status,422)
         self.assertEqual(self.driver.ops,[])
+
+    def test_stream_sse_under_shared_lease(self):
+        payload={'model':'/models/coder.gguf','stream':True,
+                 'messages':[{'role':'user','content':'ping'}]}
+        req=request.Request(self.base+'/v1/chat/completions',
+            method='POST',data=json.dumps(payload).encode(),
+            headers={'Authorization':'Bearer EXISTING_TEST_KEY_12345',
+                     'Content-Type':'application/json'})
+        with request.urlopen(req,timeout=3) as resp:
+            self.assertEqual(resp.status,200)
+            self.assertEqual(resp.headers.get_content_type(),'text/event-stream')
+            stream=resp.read()
+        self.assertIn(b'data: [DONE]',stream)
+        self.assertEqual(self.coord.active['coder'],0)
 
 
 if __name__=='__main__':
