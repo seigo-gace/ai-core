@@ -74,3 +74,20 @@ DebugAIの4モデル・6役割は既存互換と代表検証条件であり、AI
 **再起動:** 実Docker running/readinessとCore記録が不一致なら安全側で停止を保留し、新規Admission・Leaseと所有者を検証する。既存利用者の未確認通信を遮断したとの推測でモデルを退避させない。Slot/KV/cacheは製品・会話境界を保ち、再利用による他製品の文脈混入を禁止する。
 
 **互換:** 旧18080、モデルID、Bearer、Streamingとエラーの外部契約を無検証で変更しない。新しいスキーマは提案候補として扱い、既存の実エンドポイント／現Source契約との差分を確認してから採否する。
+
+## 設計検証シナリオと証拠判定（未実施）
+
+| シナリオ | 隔離設計検証で確認する結果 |
+| --- | --- |
+| 製品Aと製品Bが異なるモデル・Roleを使用 | 同一Core契約の下でそれぞれが独立した業務判断を維持し、他方のLeaseや文脈を侵害しない |
+| モデル名・数が既存4種とは異なる | RegistryとHost Policyを変更しても共通Coreの実行・資源管理契約が成立する |
+| Cold起動と別のREADY要求が競合 | Ready推論が長時間ロックに巻き込まれず、load/activeとRAM/CPU予算が整合する |
+| 複数製品のQueue競合と期限切れ | 公平性、bounded wait、キャンセル、Cold飢餓防止、明示的な過負荷応答 |
+| 通常1→2、2→一時3→2、target既READY | 既存lease保護、物理resident計測、失敗時再照合を満たす |
+| Streaming上限超・client切断 | 完走と途中切断を区別し、正当Leaseを残さない |
+| Core再起動、Docker側停止遅延、cache再利用 | 所有権不明で強制停止せず、異なる製品・会話への文脈混入を防ぐ |
+| v257とllama.cpp標準機能の部品導入候補 | 実Host BuildとOSS版の機能・品質・CPU/RAM・維持費を同条件で比較 |
+
+**判定区分:** `DESIGN_DOCUMENTED`（仕様記載）、`SOURCE_VERIFIED`（exact SHA）、`ISOLATED_VERIFIED`（隔離実行）、`HOST_VERIFIED`（実機）、`MULTI_PRODUCT_E2E_VERIFIED`（複数製品）。一段階の合格は上位の合格を意味しない。現時点の新シナリオは設計記載のみ。Master指示が設計と隔離検証である間はPR #3 Source、本番Docker、mainを変更しない。
+
+**採用判定:** 既存検証済み部品の再利用可否、独立製品向け共通契約、既存技術／OSS／新設の理由、残るUNKNOWNと反証条件がすべて記録された後にだけDraft解除と採用判断を行う。残項目を隠して「抜け漏れなし」と言わない。
