@@ -72,6 +72,34 @@ class GenericHandoffTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder','granite'})
         self.assertIsNone(core.handoff)
 
+    def test_failed_handoff_rollback_keeps_admission_until_recovered(self):
+        from runtime.model_gate import AdmissionError
+        class FlakyDriver(Driver):
+            def __init__(self, names):
+                super().__init__(names)
+                self.fail_stop=True
+            def healthy(self, spec):
+                return False
+            def stop(self, spec):
+                if self.fail_stop:
+                    raise OSError('transient stop failure')
+                super().stop(spec)
+        clock=[0]
+        driver=FlakyDriver(('coder',))
+        core=Coordinator(specs(),driver,clock=lambda:clock[0],
+                         start_timeout=0,handoff_budget_check=lambda:
+                         {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_ROLLBACK_PENDING'):
+            core.handoff_begin('coder','granite','client')
+        self.assertIsNotNone(core.handoff)
+        self.assertEqual(driver.loaded,{'coder','granite'})
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_IN_PROGRESS'):
+            core.handoff_begin('coder','ministral','other')
+        driver.fail_stop=False
+        self.assertTrue(core.handoff_expire())
+        self.assertEqual(driver.loaded,{'coder'})
+        self.assertIsNone(core.handoff)
+
     def test_handoff_retry_does_not_stop_already_absent_victim(self):
         driver=Driver(('coder','granite'))
         core=Coordinator(specs(),driver)
