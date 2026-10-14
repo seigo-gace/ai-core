@@ -665,14 +665,29 @@ def make_handler(coordinator, model, api_key):
                             self.end_headers()
                             self.close_connection = True
                             total = 0
+                            done = False
+                            tail = b''
+                            stream_error = None
                             while True:
                                 chunk = response.read1(8192)
                                 if not chunk:
                                     break
                                 total += len(chunk)
                                 if total > MAX_RESPONSE_BYTES:
+                                    stream_error = 'UPSTREAM_STREAM_TOO_LARGE'
                                     break
+                                # The final SSE marker may span read boundaries.
+                                combined = tail + chunk
+                                if b'data: [DONE]' in combined:
+                                    done = True
+                                tail = combined[-32:]
                                 self.wfile.write(chunk)
+                                self.wfile.flush()
+                            if not done:
+                                code = stream_error or 'UPSTREAM_STREAM_INCOMPLETE'
+                                self.wfile.write(('event: error\\ndata: ' +
+                                    json.dumps({'error': {'code': code}}) +
+                                    '\\n\\n').encode('utf-8'))
                                 self.wfile.flush()
                         else:
                             if int(response.getheader('Content-Length','0')) > MAX_RESPONSE_BYTES:
