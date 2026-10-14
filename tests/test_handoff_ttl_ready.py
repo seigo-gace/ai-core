@@ -41,5 +41,22 @@ class TestHandoffReadyDeadline(unittest.TestCase):
         self.assertEqual(driver.loaded, {'coder', 'qwen3'})
 
 
+    def test_inherited_ready_resident_gets_idle_deadline(self):
+        now = [100.0]
+        driver = FakeDriver(('coder',))
+        coordinator = Coordinator(
+            specs(), driver, idle_seconds=10, clock=lambda: now[0],
+        )
+        self.assertEqual(coordinator.preflight(), {'coder'})
+        self.assertEqual(coordinator.used['coder'], 100.0)
+        now[0] = 109.0
+        coordinator.reap()
+        self.assertEqual(driver.loaded, {'coder'})
+        now[0] = 111.0
+        coordinator.reap()
+        self.assertEqual(driver.loaded, set())
+
+
+
 if __name__ == '__main__':
     unittest.main()
