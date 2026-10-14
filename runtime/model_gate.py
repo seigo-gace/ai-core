@@ -647,6 +647,7 @@ def make_handler(coordinator, model, api_key):
                     raise AdmissionError(422,'WRONG_MODEL_FOR_ENDPOINT')
                 obj['model'] = target_id
                 body = json.dumps(obj,ensure_ascii=False).encode('utf-8')
+                stream_headers_sent = False
                 with coordinator.lease(model) as spec:
                     conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=600)
                     try:
@@ -663,6 +664,7 @@ def make_handler(coordinator, model, api_key):
                             self.send_header('Cache-Control','no-cache')
                             self.send_header('Connection','close')
                             self.end_headers()
+                            stream_headers_sent = True
                             self.close_connection = True
                             total = 0
                             done = False
@@ -685,7 +687,7 @@ def make_handler(coordinator, model, api_key):
                                 self.wfile.flush()
                             if stream_error or not done:
                                 code = stream_error or 'UPSTREAM_STREAM_INCOMPLETE'
-                                self.wfile.write(('event: error\\ndata: ' +
+                                self.wfile.write(('\\n\\nevent: error\\ndata: ' +
                                     json.dumps({'error': {'code': code}}) +
                                     '\\n\\n').encode('utf-8'))
                                 self.wfile.flush()
@@ -707,7 +709,11 @@ def make_handler(coordinator, model, api_key):
             except (ValueError,UnicodeDecodeError):
                 self._send(400,{'error':{'code':'BAD_REQUEST'}})
             except (OSError,TimeoutError,subprocess.TimeoutExpired):
-                self._send(503,{'error':{'code':'UPSTREAM_UNAVAILABLE'}})
+                # HTTP headers cannot be sent twice after SSE has started.
+                if not locals().get('stream_headers_sent', False):
+                    self._send(503,{'error':{'code':'UPSTREAM_UNAVAILABLE'}})
+                else:
+                    self.close_connection = True
     return Handler
 
 
