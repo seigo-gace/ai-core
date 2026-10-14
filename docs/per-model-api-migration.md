@@ -97,3 +97,23 @@ Stage A remains probe-only, not inference or lifecycle mutation. Stage B still r
 - Exact Source behavioral proof from the existing CHAT→server-core Actions→Host pathway: [Actions run 38391933579](https://github.com/G-ACE-inc/server-core/actions/runs/38391933579), [Issue #10 receipt 6144740198](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6144740198), `host.command STATE=PASS EXIT_CODE=0`, `AI_CORE_REAPER_PARALLEL=PASS SHA=cefa8161ca3cbaece3953ef2806f96c26abf534b`. This used immutable Source loaded in memory and a fake Docker driver with thread synchronization; it did **not** start/stop real containers and is narrower than the full unittest suite.
 - Dev-job policy's admitted ai-core checkout is `/home/admin1/projects/ai-core/.worktrees/source-import-20261013` on `import/server-baseline-20261013`. That registered baseline does not contain the current PR's changes. Never report a baseline `dev.job` test as a Source-exact feature test. Reuse registered writable runner when appropriate; do not alter the protected canonical checkout, grant, or source-reflection policy simply to get a test PASS.
 - **Current acceptance:** Source modification and targeted Host proof PASS; full 47/47, Stage A real process launch and authenticated probe, Stage B cold-start/cgroup delta/reclaim, DebugAI six-role and second-product E2E remain NOT_VERIFIED. PR must remain DRAFT until actual acceptance.
+
+
+## 2026-10-14 — Existing four-model API consolidation (current Source, replaces stale introductory examples)
+
+This is a **generic AI Core interface**, not a DebugAI-only feature. Existing four individually addressed model gates are preserved. They are not independent resource managers: all four share **one** Coordinator, one admission/lease policy and the existing backend containers. The design authority is the adopted [generic Core design](https://github.com/seigo-gace/ai-core/blob/main/docs/GENERIC_AI_CORE_DESIGN_VALIDATION_20261014.md). The existing initial warm-pair narrative and early “non-stream only” text above are historical: current model-policy YAML sets all four `warm: false`, and current Gate Source implements SSE streaming (Host verification pending).
+
+| Model alias | Gate (localhost only) | Existing backend (localhost only) | OpenAI-compatible routes |
+| --- | --- | --- | --- |
+| granite | 127.0.0.1:18181 | 127.0.0.1:18081 | authenticated `GET /v1/models`, `POST /v1/chat/completions` |
+| qwen3 | 127.0.0.1:18182 | 127.0.0.1:18082 | same |
+| ministral | 127.0.0.1:18183 | 127.0.0.1:18083 | same |
+| coder | 127.0.0.1:18184 | 127.0.0.1:18084 | same |
+
+Each model alias is resolved to its **actual GGUF model ID from existing Compose**, not a fabricated replacement identifier. `GET /health` is Gate liveness, not a promise that the model weight is loaded. The existing `LLAMA_SWAP_API_KEY` bearer is reused; no new credential. Model-specific requests require the exact model ID (or the preexisting model alias prefix form). Streaming stays on the same shared Lease while forwarding and must not be confused with demonstrated production compatibility.
+
+**Source/API changes in this CU:** `tests/test_model_gate.py::GateHttpTests.test_four_existing_model_apis_share_one_coordinator` now exercises all four authenticated model endpoints with one fake backend and shared Coordinator, checking per-model IDs, inference forwarding, resource limit ≤2 residents and release of the Lease after each request. `tests/test_generic_model_registry.py` checks non-DebugAI model names and configurable resident policy. The handoff deadline regression tests that transfer TTL begins after target readiness. These are **regression test source added, not executed test PASS** at this feature HEAD.
+
+**Integration order:** 1. Source-exact tests in an approved isolated checkout. 2. Safe Stage A metadata-only Gate startup (never claim probe POST works). 3. Prove all legacy/direct consumers are safely fenced and the 18080 Router-to-Gate auth + SSE contract works. 4. Admitted Stage B activation of the existing four Gate API addresses with two dynamic resident slots, then perform measured 2→3→2 and independent multi-product E2E. No direct model container start/stop or traffic cutover is permitted merely because four Gate listeners exist in Source. The 18080 Router remains the backward-compatible entrypoint until evidence permits transition.
+
+**Remaining generic improvements:** bounded multi-product queue/fairness, restart reconciliation, timeout/cancel/stream termination safety, model-specific profile and runtime OSS feature comparison. These are future Source changes in the same implementation PR, not permission to invent new APIs/ports/workflows.
