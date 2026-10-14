@@ -60,3 +60,17 @@ DebugAIの4モデル・6役割は既存互換と代表検証条件であり、AI
 既存main設計§1～14と本PRを照合。主目的＝既存AI Coreの改善・汎用化（§1/14）、Core対製品責務（§3）、既存／OSS／新規の選別（§6/11/14）、現Host固有の0～2・一時3と資源上限（§1～5）、旧API/Lease（§5/10）、冷起動・期限・Handoff・復旧（§10～14）、v257/llama.cppの部分採用（§11/14）、Sourceと実機の証拠分離（§8/12/14）、設計検証と実装の禁止境界（§12/14）には記述がある。
 
 ただし以下は**詳細設計・実証として未完成**：①複数製品共通APIのproduct識別とversion/エラー契約、②可変モデルRegistryとHost Policyの独立性、③load枠・active枠・fair queueの不変条件、④再起動時Lease照合と製品・会話別Cache隔離、⑤現HostのOSS対応実測、⑥独立した二製品での受入試験。DebugAI固有の4モデル/6役割は汎用化の上限ではない。45/45過去Source PASSを最新全体や本番PASSと扱わない。未確定6点をこのDraft内で解消し、完成前にマージ・実装しない。
+
+## 汎用API・状態・Ownerの詳細設計候補（未採用）
+
+**登録:** モデルは `model_id`、backend endpoint、runtime capabilities、model-specific resource profile、現物identityと互換contract revisionで登録する。既存4モデル名は初期データであり、汎用Coreコードに固定しない。特定Hostで適用される `max_resident`、`max_active`、`temporary_handoff_capacity`、memory/cpu上限は独立したHost policyとして検証する。
+
+**要求:** 認証済みrequestは製品境界識別子、`request_id`、`model_id`、deadline、stream指定を受付。PromptやThinking等の推論payloadを透過的に転送し、その意味をCoreが判断しない。製品識別子はクライアントの自己申告だけで信頼せず、既存認証・委任された実利用者と突合する方式を検討する。新Tokenを作ることはこのCU範囲外。
+
+**同時実行:** モデル起動のreservationと推論のactive leaseは別の資源。実起動中は物理CPU/RAMを消費するので二つを完全独立の無制限枠にはしない。既READYへの要求を不用意に429にしない一方、Coldの飢餓を招かない有限Queue・期限・キャンセルを比較する。既存のglobal semaphore、各modelの`np=1`、現Host上限を維持する。
+
+**機械的引継ぎ:** `owner`、旧・新model、ticket、startup deadline、READY後transfer deadline、物理resident予約、active leaseを保持する。開始・READY・完了・中止・期限切れ・再起動を分ける。業務上の引継ぎ内容や成功判定は製品が担う。既存transition guardと物理停止確認を再利用する。
+
+**再起動:** 実Docker running/readinessとCore記録が不一致なら安全側で停止を保留し、新規Admission・Leaseと所有者を検証する。既存利用者の未確認通信を遮断したとの推測でモデルを退避させない。Slot/KV/cacheは製品・会話境界を保ち、再利用による他製品の文脈混入を禁止する。
+
+**互換:** 旧18080、モデルID、Bearer、Streamingとエラーの外部契約を無検証で変更しない。新しいスキーマは提案候補として扱い、既存の実エンドポイント／現Source契約との差分を確認してから採否する。
