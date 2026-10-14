@@ -191,3 +191,53 @@ Master指示：検証が必要なら既存サーバー隔離コンテナを使�
 - **現段階で退ける案**：現行エンジンを丸ごと作り直す、GPU研究の倍率をCPU Hostへ外挿して採用する、4モデルや6役割を減らして見かけの性能を上げる、認証経路を迂回して直接Backendを共通制御の代用とする。
 
 設計上の優先順は「利用者の機能・互換復帰と単一Lease」→「実仕事の並列/待機改善」→「モデル別profileとCache/Sleepの実測比較」→「構成の固定採用」である。小さなSourceテストがPASSしても、製品E2Eや実RAM改善とは別の証拠として扱う。
+
+
+## 14. 最終設計：既存の検証済み部品を活用する汎用AI Core（2026-10-14）
+
+### 14.1 主目的と責務の確定
+
+**主目的は既存AI Coreの改善と汎用化**。複数の独立したAI製品が、共通の推論実行・モデル管理・資源調停・安全隔離・障害回復・計測を同一基盤から利用できるようにする。DebugAIの4モデルと6役割は第一の実用確認対象であり、AI Coreの用途・役割数・将来のモデル上限ではない。以下の汎用契約を特定製品に依存しない形で運用する。
+
+- Core所有：登録モデルの汎用ID/能力情報、認証された共通推論API、モデルLifecycle、共有AdmissionとLease、物理資源予算、有限待機・キャンセル、モデルの機械的引継ぎ、製品別隔離と共通状態観測。
+- 製品所有：目的、役割構成とモデル選択、タスク依存関係・並列可否、Prompt/Thinking/Tool/DB、引継ぐ情報、意味品質と成果完成判定。
+- 共通資源の決定権は1箇所。llama-swapのRouter、個別Gate、Docker backendを組み合わせるときも、物理モデル起動停止とLeaseの最終Ownerを重複させない。機能境界はインターフェースで切り、特定モデル名で実装判断を分岐しない。
+- 現Hostの通常0～2・引継ぎ時一時最大3と親資源High34GiB/Max36GiB/CPU6は**現導入環境のPolicy**。他のHost/新モデルでも同じ数字をライブラリの固定仕様にしない。
+
+### 14.2 再利用決定表（SOURCE/TEST/RUNTIMEの証拠を分離）
+
+| 責務・資産 | 再利用する現状 | 現時点の証拠 | 採用・補修条件 |
+|---|---|---|---|
+| 既存推論engineとモデル資産 | 既存llama.cpp個別backend、Docker/Composeとモデルweight | Source/旧Host稼働実績あり。旧4常駐の合計約32.129GiBは実測 | そのまま基盤として再利用。OSSのsleep/cache/kv調整はHost版適合・品質/費用比較後だけ |
+| 認証とRouter | 既存llama-swap v257、18080 API、既存Key、model ID、peers | 旧互換Source・実績あり。Gate向けpeer生成と鍵転送はSource生成のテストあり | 旧経路を保持。実際の18080→Gate auth/streamと全通信のLease排他は未検証 |
+| 単一model Gate/共有Coordinator | PR #3のmodel_gate.py、既存Driver、lock/transition/semaphore | 45/45 Source/API mock suite PASSは旧SHA c24ec5fで確認。最新PR #3全体への横滑り認定は禁止 | 機能を再作成せず、汎用化契約との差分だけ設計・後続実装対象 |
+| 安全な物理容器操作 | pre-existing container identity/cgroup/limits、Docker start/stop | 模擬Sourceテスト有り。実機の2→3→2自動実行は未検証 | 新しい容器再作成・無Lease停止を許さず、安全に実Hostで確認 |
+| 動的0～2と一時3→2 | Coordinatorのcold/evict/handoff/owner ticket/期限/回収 | 45件のSource/API模擬テスト群で重要なケースをカバー。実Host動的handoffは未実証 | 初期resident・異常復旧・READY後TTL・対象既READY等の設計差分を残す |
+| 観測と資源制限 | cgroup、systemd、host_readinessと既存記録経路 | 実Host4→2手動停止でmemory.current差17,044,062,208B観測 | 個別機能の再利用確定。品質/総仕事E2EとRuntime一貫性は別の受入 |
+| HTTP/SSE | 既存Gate認証/forwarding、Source streaming対応 | Gate模擬テストにSource実績、Router統合/本番完走は未証明 | bytes上限、stream異常終端、Tool/JSON/schema互換を総合比較 |
+| 外部OSS | v257モデルTTL/退避cost/priority、llama.cpp sleep/slot/cache等 | 上流タグ/仕様上で存在。両RepoはMIT表示 | 稼働buildの対応、秘密文脈隔離、CPU性能、依存・保守負担を採否条件にする |
+| 複数製品Admission | 共通lease/認証はSource資産として利用 | DebugAIと第二の独立製品によるRuntime E2Eは未検証 | 公平な有限Queue・deadline・製品分離が不足なら既存改善/OSS/新規部分で構成 |
+
+*証拠*: [Source契約45/45](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6158958379)、[Gate向けpeer生成](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6158985118)、[手動RAM回収](https://github.com/seigo-gace/ai-core/issues/1#issuecomment-6152014424)、[現行PR #3](https://github.com/seigo-gace/ai-core/pull/3)。過去のPASSを現行の未実施テスト・全機能・本番稼働へ転用しない。
+
+### 14.3 設計方式の選定と不採用
+
+**現段階の設計選択：既存の個別backend＋Router互換＋単一共有Coordinatorを汎用基盤の出発点として継続利用する。** 理由は既存の検証済み機能・資源保護・認証・移行互換を多く維持でき、問題のある機能だけ改善できるため。これは実機パフォーマンス優位性が証明されたという意味ではない。
+
+- 改善対象：Coldロードの予約とActive推論slotの分離、有限公平Queue/Deadline、Crash後の物理状態再照合、TTLと引継ぎ期限の分離、全通信のLease所有、SSE異常終端、モデル別Policy。
+- OSS採用比較対象：v257の入替cost/FIFO/TTL、llama.cppのSleep/KV/slot機能。使える部分だけを採用し、Router全体の資源Owner移管・推論エンジン全置換は**必要性がまだ成立しないため現段階では不採用**。技術が不要という意味ではなく、将来の比較再開を妨げない。
+- 必要な新規部分：複数製品で共通の公平な待機・予約・復旧の不足を、既存OSSと現Coordinatorの双方で満たせない場合に限定して追加する。コードが増える・減るだけで採否を決めない。
+
+### 14.4 汎用化の受入条件・隔離検証
+
+設計の検証は既存の**隔離ブランチ／隔離コンテナ**を利用し、Source実装ブランチPR #3を変更しない。設計検証の実験コードは本番候補へ自動移植しない。隔離検証は必要なCPU/RAMに応じて現登録実行契約内で行い、許容上限を超える実モデル試験は別に実際のHost認可済み環境で行う。
+
+A. 異なる2以上の独立AI製品で**同じ共通API**を利用し、役割・Prompt・Thinking・Toolの決定を各製品へ残したまま推論できる。
+B. モデル登録と設定が既存4名に依存せず、異なる名前・個数でも同一Coordinator契約を実行できる。現Hostの0～2・一時3はConfigとして適用する。
+C. 複数製品が同じmodel/異なるmodelを同時に使っても、他製品leaseや文脈を混同せず、公平性・期限・キャンセル・復旧を確認できる。
+D. 起動中のREADYリクエスト、2→3→2、rollback、TTL、再起動、SSEの正常/異常終端を個別に再現し、現行Source実装済みと設計上の未実装を区別できる。
+E. 実Hostの上限・RAM/CPU/PSI・cold loadと製品品質を同条件で測定し、従来の共通基盤に対する改善を示せる。実機未計測の数値は受入結果をUNKNOWNに保つ。
+
+### 14.5 現在の作業境界（重要）
+
+本節は**設計正本のみ**。Masterの指示は設計完成と、その設計に必要な隔離検証であり、PR #3の新規実装やHostへの反映許可ではない。2026-10-14に誤って加えたPR #3の実装差分は、GitHub Issue #1の記録どおり元のSourceに戻され、feature HEAD 1945438351f9b359d2b5480397661c5fd4e73dc2と従来HEAD 2b6344e108a5d9515beef977b590b6c6a1a8d15aは差分ゼロを確認済み。該当修正案は、検証済み機能ではなく**将来の実装課題**として扱う。運用検証が終わらない項目をPASSにせず、Source→隔離→Host→二製品E2Eの順で設計受入の証拠を区別する。
