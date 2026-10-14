@@ -241,6 +241,12 @@ class Coordinator:
             loaded = self.running()
             if len(loaded) > self.max_loaded and not self.observe_only:
                 raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
+            # An inherited READY resident has an idle clock even before its first request.
+            if not self.observe_only:
+                now = self.clock()
+                for name in loaded:
+                    if self.used[name] is None:
+                        self.used[name] = now
             return loaded
 
     def _make_room(self, target):
