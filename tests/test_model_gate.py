@@ -52,6 +52,30 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(items['coder']['model_id'],
                          '/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf')
         self.assertEqual(items['qwen3']['memory_limit_bytes'],9216*(1024**2))
+    def test_policy_rejects_boolean_numeric_fields(self):
+        import copy
+        import yaml
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        variants=(
+            ('gate_port', lambda p: p['models']['coder'].__setitem__('gate_port', True),
+             'INVALID_GATE_PORT'),
+            ('max_resident', lambda p: p.__setitem__('max_resident', True),
+             'INVALID_ADMISSION_LIMITS'),
+            ('max_active', lambda p: p.__setitem__('max_active', True),
+             'INVALID_ADMISSION_LIMITS'),
+            ('idle_seconds', lambda p: p.__setitem__('idle_seconds', True),
+             'INVALID_IDLE_SECONDS'),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'policy.yaml'
+            for label,mutate,error_code in variants:
+                with self.subTest(field=label):
+                    candidate=copy.deepcopy(policy)
+                    mutate(candidate)
+                    path.write_text(yaml.safe_dump(candidate),encoding='utf-8')
+                    with self.assertRaisesRegex(ValueError,error_code):
+                        load_policy(path)
+
     def test_duplicate_gate_port_rejected(self):
         text=(ROOT/'runtime/model-policy.yaml').read_text()
         with tempfile.TemporaryDirectory() as tmp:
