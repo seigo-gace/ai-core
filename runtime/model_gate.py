@@ -411,28 +411,32 @@ class Coordinator:
             if self.handoff or self.transitioning:
                 raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
             loaded = self.running()
-            if previous not in loaded or target in loaded or len(loaded) != self.max_loaded:
+            if previous not in loaded or len(loaded) > self.max_loaded:
                 raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
-            if len(loaded) + 1 > 3:
+            needs_start = target not in loaded
+            if len(loaded) + int(needs_start) > 3:
                 raise AdmissionError(409, 'HANDOFF_CAPACITY_EXCEEDED')
             # Reserve under the mutex; the potentially slow parent cgroup
             # probe happens after unlocking so ready inference can proceed.
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
                             'ticket': secrets.token_urlsafe(32),
-                            'expires': None, 'ready_ttl': ttl}
-            self.transitioning.add(target)
+                            'expires': None, 'ready_ttl': ttl,
+                             'started_target': needs_start}
+            if needs_start:
+                self.transitioning.add(target)
         try:
-            budget = self.handoff_budget_check()
-            if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
-                raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
-            self.driver.start(self.specs[target])
-            deadline = self.clock() + self.start_timeout
-            while self.clock() < deadline:
-                if self.driver.healthy(self.specs[target]):
-                    break
-                time.sleep(0.4)
-            else:
-                raise AdmissionError(503, 'HANDOFF_TARGET_NOT_READY')
+            budget = self.handoff_budget_check() if needs_start else None
+            if needs_start:
+                if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
+                    raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
+                self.driver.start(self.specs[target])
+                deadline = self.clock() + self.start_timeout
+                while self.clock() < deadline:
+                    if self.driver.healthy(self.specs[target]):
+                        break
+                    time.sleep(0.4)
+                else:
+                    raise AdmissionError(503, 'HANDOFF_TARGET_NOT_READY')
             with self.lock:
                 if len(self.running()) > 3:
                     raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
@@ -444,9 +448,9 @@ class Coordinator:
             # otherwise a later cold start could create a fourth resident.
             cleanup_ok = False
             try:
-                if self.driver.running(self.specs[target]):
+                if needs_start and self.driver.running(self.specs[target]):
                     self.driver.stop(self.specs[target])
-                cleanup_ok = not self.driver.running(self.specs[target])
+                cleanup_ok = not needs_start or not self.driver.running(self.specs[target])
             except Exception:
                 pass
             with self.lock:
@@ -461,7 +465,8 @@ class Coordinator:
             raise
         finally:
             with self.lock:
-                self.transitioning.discard(target)
+                if needs_start:
+                    self.transitioning.discard(target)
 
     def handoff_finish(self, owner, *, completed=True, ticket=None):
         """Finish or cancel; a busy model is never stopped."""
@@ -473,7 +478,10 @@ class Coordinator:
                 raise AdmissionError(403, 'HANDOFF_TICKET_INVALID')
             if self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
-            victim = state['from'] if completed else state['to']
+            victim = state['from'] if completed else (state['to'] if state.get('started_target') else None)
+            if victim is None:
+                self.handoff = None
+                return
             if self.active[victim]:
                 raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
             self.transitioning.add(victim)
