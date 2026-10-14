@@ -683,7 +683,7 @@ def make_handler(coordinator, model, api_key):
                                 tail = combined[-32:]
                                 self.wfile.write(chunk)
                                 self.wfile.flush()
-                            if not done:
+                            if stream_error or not done:
                                 code = stream_error or 'UPSTREAM_STREAM_INCOMPLETE'
                                 self.wfile.write(('event: error\\ndata: ' +
                                     json.dumps({'error': {'code': code}}) +
