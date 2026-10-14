@@ -624,8 +624,8 @@ def make_handler(coordinator, model, api_key):
                 if length < 1 or length > MAX_REQUEST_BYTES:
                     raise AdmissionError(413,'INVALID_REQUEST_SIZE')
                 obj = json.loads(self.rfile.read(length).decode('utf-8'))
-                if not isinstance(obj,dict) or obj.get('stream',False) is not False:
-                    raise AdmissionError(422,'NONSTREAM_JSON_REQUIRED')
+                if not isinstance(obj,dict) or not isinstance(obj.get('stream',False),bool):
+                    raise AdmissionError(422,'INVALID_STREAM_FLAG')
                 target_id = coordinator.specs[model]['model_id']
                 if obj.get('model') not in (target_id,model+'/'+target_id):
                     raise AdmissionError(422,'WRONG_MODEL_FOR_ENDPOINT')
@@ -637,16 +637,38 @@ def make_handler(coordinator, model, api_key):
                         conn.request('POST','/v1/chat/completions',body=body,
                                      headers={'Content-Type':'application/json'})
                         response = conn.getresponse()
-                        if int(response.getheader('Content-Length','0')) > MAX_RESPONSE_BYTES:
-                            raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
-                        upstream = response.read(MAX_RESPONSE_BYTES+1)
-                        if len(upstream) > MAX_RESPONSE_BYTES:
-                            raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
-                        self.send_response(response.status)
-                        self.send_header('Content-Type','application/json')
-                        self.send_header('Content-Length',str(len(upstream)))
-                        self.end_headers()
-                        self.wfile.write(upstream)
+                        if obj.get('stream',False):
+                            if response.status != 200 or not response.getheader('Content-Type','').lower().startswith('text/event-stream'):
+                                raise AdmissionError(502,'UPSTREAM_STREAM_CONTRACT_INVALID')
+                            # Keep the shared model lease until the upstream SSE
+                            # stream terminates (including client disconnect).
+                            self.send_response(200)
+                            self.send_header('Content-Type','text/event-stream')
+                            self.send_header('Cache-Control','no-cache')
+                            self.send_header('Connection','close')
+                            self.end_headers()
+                            self.close_connection = True
+                            total = 0
+                            while True:
+                                chunk = response.read1(8192)
+                                if not chunk:
+                                    break
+                                total += len(chunk)
+                                if total > MAX_RESPONSE_BYTES:
+                                    break
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                        else:
+                            if int(response.getheader('Content-Length','0')) > MAX_RESPONSE_BYTES:
+                                raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            upstream = response.read(MAX_RESPONSE_BYTES+1)
+                            if len(upstream) > MAX_RESPONSE_BYTES:
+                                raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            self.send_response(response.status)
+                            self.send_header('Content-Type','application/json')
+                            self.send_header('Content-Length',str(len(upstream)))
+                            self.end_headers()
+                            self.wfile.write(upstream)
                     finally:
                         conn.close()
             except AdmissionError as error:
