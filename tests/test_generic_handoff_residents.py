@@ -44,5 +44,33 @@ class GenericHandoffTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'granite'})
         self.assertEqual(driver.ops,[('start','granite'),('stop','coder')])
 
+    def test_ready_target_complete_only_reclaims_source(self):
+        driver=Driver(('coder','granite'))
+        core=Coordinator(specs(),driver,handoff_budget_check=lambda: self.fail('no cold start'))
+        state=core.handoff_begin('coder','granite','client')
+        core.handoff_finish('client',ticket=state['ticket'])
+        self.assertEqual(driver.loaded,{'granite'})
+        self.assertEqual(driver.ops,[('stop','coder')])
+
+    def test_single_resident_abort_only_reclaims_new_target(self):
+        driver=Driver(('coder',))
+        core=Coordinator(specs(),driver,handoff_budget_check=lambda:
+                         {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
+        state=core.handoff_begin('coder','granite','client')
+        core.handoff_finish('client',completed=False,ticket=state['ticket'])
+        self.assertEqual(driver.loaded,{'coder'})
+        self.assertEqual(driver.ops,[('start','granite'),('stop','granite')])
+
+    def test_ready_target_expiry_keeps_preexisting_model(self):
+        clock=[0]
+        driver=Driver(('coder','granite'))
+        core=Coordinator(specs(),driver,clock=lambda:clock[0],
+                         handoff_budget_check=lambda: self.fail('no cold start'))
+        core.handoff_begin('coder','granite','client',ttl=2)
+        clock[0]=3
+        self.assertTrue(core.handoff_expire())
+        self.assertEqual(driver.loaded,{'coder','granite'})
+        self.assertIsNone(core.handoff)
+
 if __name__=='__main__':
     unittest.main()
