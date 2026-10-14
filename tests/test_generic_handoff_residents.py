@@ -72,5 +72,28 @@ class GenericHandoffTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'coder','granite'})
         self.assertIsNone(core.handoff)
 
+    def test_busy_source_rejects_completion_without_stopping(self):
+        from runtime.model_gate import AdmissionError
+        driver=Driver(('coder','granite'))
+        core=Coordinator(specs(),driver,handoff_budget_check=lambda: self.fail('no cold start'))
+        state=core.handoff_begin('coder','granite','client')
+        with core.lease('coder'):
+            with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
+                core.handoff_finish('client',ticket=state['ticket'])
+            self.assertEqual(driver.ops,[])
+            self.assertIsNotNone(core.handoff)
+        core.handoff_finish('client',ticket=state['ticket'])
+        self.assertEqual(driver.loaded,{'granite'})
+
+    def test_wrong_ticket_never_stops_preexisting_target(self):
+        from runtime.model_gate import AdmissionError
+        driver=Driver(('coder','granite'))
+        core=Coordinator(specs(),driver,handoff_budget_check=lambda: self.fail('no cold start'))
+        core.handoff_begin('coder','granite','client')
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_TICKET_INVALID'):
+            core.handoff_finish('client',completed=False,ticket='bad')
+        self.assertEqual(driver.ops,[])
+        self.assertIsNotNone(core.handoff)
+
 if __name__=='__main__':
     unittest.main()
