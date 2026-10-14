@@ -678,7 +678,8 @@ def make_handler(coordinator, model, api_key):
                                     break
                                 # The final SSE marker may span read boundaries.
                                 combined = tail + chunk
-                                if b'data: [DONE]' in combined:
+                                if (b'data: [DONE]\\n\\n' in combined or
+                                        b'data: [DONE]\\r\\n\\r\\n' in combined):
                                     done = True
                                 tail = combined[-32:]
                                 self.wfile.write(chunk)
