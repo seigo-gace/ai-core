@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import hmac
 import http.client
+from http.client import HTTPException as UpstreamHTTPException
 import json
 import os
 import re
@@ -750,7 +751,7 @@ def make_handler(coordinator, model, api_key):
                                 try:
                                     chunk = response.read1(8192)
                                 except (OSError, TimeoutError, ValueError,
-                                        http.client.HTTPException):
+                                        UpstreamHTTPException):
                                     stream_error = 'UPSTREAM_STREAM_INTERRUPTED'
                                     break
                                 if not chunk:
@@ -840,7 +841,7 @@ def make_handler(coordinator, model, api_key):
                     self._send(400,{'error':{'code':'BAD_REQUEST'}})
                 else:
                     self.close_connection = True
-            except (OSError,TimeoutError,subprocess.TimeoutExpired,http.client.HTTPException):
+            except (OSError,TimeoutError,subprocess.TimeoutExpired,UpstreamHTTPException):
                 # An upstream HTTP protocol disconnect is an unavailable backend,
                 # not an unhandled handler failure. The lease exits in finally.
                 # HTTP headers cannot be sent twice after SSE has started.
