@@ -369,6 +369,11 @@ class Coordinator:
         if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 30:
             raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
         if not wait_seconds:
+            # Fail-fast traffic cannot jump ahead of clients that elected to
+            # wait. Keep admission FIFO across both request classes.
+            with self.wait_condition:
+                if self.waiters:
+                    raise AdmissionError(429, 'ADMISSION_QUEUE_BUSY')
             return self.acquire(model)
         deadline = self.clock() + wait_seconds
         ticket = object()
