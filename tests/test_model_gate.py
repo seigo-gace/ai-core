@@ -897,6 +897,15 @@ class GateHttpTests(unittest.TestCase):
         status,data=self.req('/v1/models')
         self.assertEqual(status,200)
         self.assertEqual(data['data'][0]['id'],'/models/coder.gguf')
+    def test_authenticated_running_source_fingerprint(self):
+        import hashlib
+        from runtime import model_gate
+        status,data=self.req('/internal/source/status')
+        self.assertEqual(status,200)
+        self.assertEqual(data['source_sha256'],
+                         hashlib.sha256(Path(model_gate.__file__).read_bytes()).hexdigest())
+        self.assertEqual(data['gate_model'],'coder')
+
     def test_alias_forwarded_as_native_model(self):
         status,data=self.req('/v1/chat/completions',
                              {'model':'coder//models/coder.gguf',
