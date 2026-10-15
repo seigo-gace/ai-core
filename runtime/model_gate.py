@@ -740,8 +740,18 @@ def make_handler(coordinator, model, api_key):
                                     '\\n\\n').encode('utf-8'))
                                 self.wfile.flush()
                         else:
-                            if int(response.getheader('Content-Length','0')) > MAX_RESPONSE_BYTES:
-                                raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            # An invalid upstream framing header is a backend
+                            # protocol failure, never a bad client request.
+                            declared_length = response.getheader('Content-Length')
+                            if declared_length is not None:
+                                try:
+                                    declared_length = int(declared_length)
+                                except (ValueError, TypeError) as error:
+                                    raise AdmissionError(502,'UPSTREAM_HTTP_FRAMING_INVALID') from error
+                                if declared_length < 0:
+                                    raise AdmissionError(502,'UPSTREAM_HTTP_FRAMING_INVALID')
+                                if declared_length > MAX_RESPONSE_BYTES:
+                                    raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
                             upstream = response.read(MAX_RESPONSE_BYTES+1)
                             if len(upstream) > MAX_RESPONSE_BYTES:
                                 raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
