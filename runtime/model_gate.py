@@ -695,7 +695,11 @@ def make_handler(coordinator, model, api_key):
                             awaiting_done_terminator = False
                             stream_error = None
                             while True:
-                                chunk = response.read1(8192)
+                                try:
+                                    chunk = response.read1(8192)
+                                except (OSError, TimeoutError, http.client.HTTPException):
+                                    stream_error = 'UPSTREAM_STREAM_INTERRUPTED'
+                                    break
                                 if not chunk:
                                     break
                                 total += len(chunk)
