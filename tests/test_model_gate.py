@@ -872,6 +872,22 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
         self.assertEqual(self.coord.active['coder'],0)
+    def test_upstream_protocol_disconnect_returns_503_and_releases_lease(self):
+        # A backend that disconnects before an HTTP response must not leave
+        # the HTTP handler silent or strand the shared inference slot.
+        import http.client
+        def disconnected(*args, **kwargs):
+            raise http.client.RemoteDisconnected('upstream closed')
+        with patch('runtime.model_gate.http.client.HTTPConnection') as connection:
+            connection.return_value.getresponse.side_effect = disconnected
+            status, data = self.req('/v1/chat/completions',
+                                    {'model':'/models/coder.gguf',
+                                     'messages':[{'role':'user','content':'ping'}],
+                                     'stream':False})
+        self.assertEqual(status,503)
+        self.assertEqual(data['error']['code'],'UPSTREAM_UNAVAILABLE')
+        self.assertEqual(self.coord.active['coder'],0)
+
     def test_four_existing_model_apis_share_one_coordinator(self):
         # Four model-local gates, not four independent resource managers.
         # Reuse the same mocked backend while verifying model IDs,
