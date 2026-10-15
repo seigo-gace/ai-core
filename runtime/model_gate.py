@@ -849,9 +849,9 @@ def main(argv=None):
         return 0
     if not args.exclusive_traffic:
         parser.error('--serve requires --exclusive-traffic')
-    key = os.environ.get('LLAMA_SWAP_API_KEY','')
+    key = os.environ.get('AI_CORE_API_KEY','')
     if len(key) < 16:
-        parser.error('existing LLAMA_SWAP_API_KEY environment must be configured')
+        parser.error('AI_CORE_API_KEY environment must be configured')
     budget = verify_parent_budget(specs,policy)
     print('MODEL_GATE_PARENT_BUDGET=PASS CPU_CORES='+str(budget['parent_cpu_cores'])+
           ' MAX_BYTES='+str(budget['parent_memory_max']))
