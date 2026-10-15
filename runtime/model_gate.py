@@ -175,6 +175,8 @@ class ExistingContainerDriver:
         labels = (container.get('Config') or {}).get('Labels') or {}
         if labels.get('com.docker.compose.project') != 'ai-core' or labels.get('com.docker.compose.service') != spec['service']:
             raise AdmissionError(409, 'COMPOSE_OWNER_MISMATCH')
+        if (hc.get('RestartPolicy') or {}).get('Name') != 'no':
+            raise AdmissionError(409, 'BACKEND_RESTART_POLICY_NOT_MANAGED')
         if hc.get('CgroupParent') != 'ai-core.slice':
             raise AdmissionError(409, 'BACKEND_CGROUP_NOT_PROTECTED')
         if int(hc.get('Memory') or 0) != spec['memory_limit_bytes']:
