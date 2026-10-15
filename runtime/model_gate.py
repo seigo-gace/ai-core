@@ -207,7 +207,7 @@ class ExistingContainerDriver:
 
     def healthy(self, spec):
         try:
-            conn = UpstreamConnection('127.0.0.1',spec['backend_port'],timeout=3)
+            conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=3)
             conn.request('GET','/health')
             response = conn.getresponse()
             response.read(4096)
@@ -727,7 +727,7 @@ def make_handler(coordinator, model, api_key):
                 if wait_ms > 30000:
                     raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
                 with coordinator.lease(model, wait_seconds=wait_ms / 1000) as spec:
-                    conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=600)
+                    conn = UpstreamConnection('127.0.0.1',spec['backend_port'],timeout=600)
                     try:
                         conn.request('POST','/v1/chat/completions',body=body,
                                      headers={'Content-Type':'application/json'})
