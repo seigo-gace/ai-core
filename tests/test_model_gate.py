@@ -315,6 +315,7 @@ class CoordinatorTests(unittest.TestCase):
                 self.assertLessEqual(len(driver.loaded),3)
                 coordinator.handoff_finish('project-a',ticket=handoff['ticket'])
                 self.assertLessEqual(len(driver.loaded),2)
+                self.assertIn('granite',driver.loaded)
                 self.assertIsNone(coordinator.handoff)
 
     def test_handoff_ticket_prevents_cross_project_completion(self):
