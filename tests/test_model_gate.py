@@ -938,7 +938,7 @@ class GateHttpTests(unittest.TestCase):
         import http.client
         def disconnected(*args, **kwargs):
             raise http.client.RemoteDisconnected('upstream closed')
-        with patch('runtime.model_gate.http.client.HTTPConnection') as connection:
+        with patch('runtime.model_gate.UpstreamConnection') as connection:
             connection.return_value.getresponse.side_effect = disconnected
             status, data = self.req('/v1/chat/completions',
                                     {'model':'/models/coder.gguf',
