@@ -15,8 +15,8 @@ The original implementation exists on the host and must be imported from there, 
 ## Existing contracts to preserve
 
 - Independent backend listeners already exist for Granite, Qwen3, Ministral and Coder (loopback ports 18081–18084).
-- The current llama-swap 18080 endpoint is an authenticated compatibility proxy with a total concurrency limit; bypassing it must **not bypass security/admission**.
-- `router/scripts/runtime_contract_gate.py` currently requires `models: {}` and forbids the **router** from owning the backend lifecycle. Keep that boundary unless intentionally redesigned and validated.
+- The old llama-swap 18080 endpoint is retired and must remain stopped. It is not a compatibility dependency or rollback route. All consumers must use authenticated model-specific Gates through the shared Coordinator; direct backend requests without a lease are forbidden.
+- The new shared Coordinator is the sole lifecycle and admission owner. Resource protection and validation logic formerly kept under `router/` must be retained only where needed for the new Gate/Compose path; retired Router configuration must not be launched.
 - Existing `ai-core.slice`, `compose.runtime.yml`, generated resource plan, overrides, actual-value gates and rollback are source assets to reuse.
 - Current host resource authority and production state are **not** changed by bootstrapping this repository.
 
