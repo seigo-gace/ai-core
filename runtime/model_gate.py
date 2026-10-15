@@ -757,7 +757,9 @@ def make_handler(coordinator, model, api_key):
                     self._send(400,{'error':{'code':'BAD_REQUEST'}})
                 else:
                     self.close_connection = True
-            except (OSError,TimeoutError,subprocess.TimeoutExpired):
+            except (OSError,TimeoutError,subprocess.TimeoutExpired,http.client.HTTPException):
+                # An upstream HTTP protocol disconnect is an unavailable backend,
+                # not an unhandled handler failure. The lease exits in finally.
                 # HTTP headers cannot be sent twice after SSE has started.
                 if not locals().get('stream_headers_sent', False):
                     self._send(503,{'error':{'code':'UPSTREAM_UNAVAILABLE'}})
