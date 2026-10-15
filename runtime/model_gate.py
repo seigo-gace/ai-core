@@ -479,6 +479,18 @@ class Coordinator:
             if self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
             victim = state['from'] if completed else (state['to'] if state.get('started_target') else None)
+            if completed and victim not in self.running():
+                # The source model can be nonresident in a general handoff.
+                # Reclaim an idle unrelated resident only if a third exists.
+                loaded = self.running()
+                if len(loaded) > self.max_loaded:
+                    candidates = [m for m in loaded if m != state['to']
+                                  and self.active[m] == 0]
+                    if not candidates:
+                        raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
+                    victim = min(candidates,
+                                 key=lambda m:(self.specs[m]['warm'],
+                                               self.used[m] or 0, m))
             if victim is None:
                 self.handoff = None
                 return
