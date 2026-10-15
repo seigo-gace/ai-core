@@ -685,7 +685,8 @@ def make_handler(coordinator, model, api_key):
                             self.close_connection = True
                             total = 0
                             done = False
-                            tail = b''
+                            pending_sse_line = b''
+                            awaiting_done_terminator = False
                             stream_error = None
                             while True:
                                 chunk = response.read1(8192)
@@ -695,11 +696,20 @@ def make_handler(coordinator, model, api_key):
                                 if total > MAX_RESPONSE_BYTES:
                                     stream_error = 'UPSTREAM_STREAM_TOO_LARGE'
                                     break
-                                # The final SSE marker may span read boundaries.
-                                combined = tail + chunk
-                                if b'data: [DONE]' in combined:
-                                    done = True
-                                tail = combined[-32:]
+                                # Only a complete SSE data event followed by
+                                # an empty line is a legitimate terminal marker.
+                                # A substring inside JSON content is not [DONE].
+                                pending_sse_line += chunk
+                                while b'\n' in pending_sse_line:
+                                    line, pending_sse_line = pending_sse_line.split(b'\n', 1)
+                                    line = line.rstrip(b'\r')
+                                    if line == b'data: [DONE]':
+                                        awaiting_done_terminator = True
+                                    elif line == b'' and awaiting_done_terminator:
+                                        done = True
+                                        awaiting_done_terminator = False
+                                    else:
+                                        awaiting_done_terminator = False
                                 self.wfile.write(chunk)
                                 self.wfile.flush()
                             if stream_error or not done:
