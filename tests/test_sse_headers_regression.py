@@ -53,6 +53,7 @@ class SSEHeadersRegression(unittest.TestCase):
                 with request.urlopen(req, timeout=3) as response:
                     body = response.read()
                     self.assertEqual(response.status, 200)
+                    self.assertIn(b'UPSTREAM_STREAM_INTERRUPTED', body)
                     self.assertNotIn(b'HTTP/1.0 400', body)
                     self.assertNotIn(b'HTTP/1.0 503', body)
             self.assertEqual(gate.active['test'], 0)
