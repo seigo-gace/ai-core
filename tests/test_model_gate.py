@@ -841,7 +841,10 @@ class GateHttpTests(unittest.TestCase):
                     output=b'{invalid json'
                 self.send_response(200)
                 self.send_header('Content-Type','application/json')
-                self.send_header('Content-Length',str(len(output)))
+                if data.get('messages', [{}])[0].get('content') == 'invalid-length':
+                    self.send_header('Content-Length','not-a-number')
+                else:
+                    self.send_header('Content-Length',str(len(output)))
                 self.end_headers()
                 self.wfile.write(output)
         self.backend=ThreadingHTTPServer(('127.0.0.1',0),Backend)
@@ -892,6 +895,15 @@ class GateHttpTests(unittest.TestCase):
                               'stream':False})
         self.assertEqual(status,502)
         self.assertEqual(data['error']['code'],'UPSTREAM_JSON_CONTRACT_INVALID')
+        self.assertEqual(self.coord.active['coder'],0)
+
+    def test_malformed_upstream_http_framing_returns_502_and_releases_lease(self):
+        status,data=self.req('/v1/chat/completions',
+                             {'model':'/models/coder.gguf',
+                              'messages':[{'role':'user','content':'invalid-length'}],
+                              'stream':False})
+        self.assertEqual(status,502)
+        self.assertEqual(data['error']['code'],'UPSTREAM_HTTP_FRAMING_INVALID')
         self.assertEqual(self.coord.active['coder'],0)
 
     def test_upstream_protocol_disconnect_returns_503_and_releases_lease(self):
