@@ -8,6 +8,17 @@ This file describes a development candidate, not a production deployment.
 - Admission leases protect models in use; global active requests <=2.
 - Idle backends release memory when safe. The legacy 18080 router is retired: it is never started, proxied through, or used as an operational fallback. All inference requests must acquire a lease through the shared Coordinator and model-specific Gate.
 
+## Bounded inference admission
+- Existing requests remain immediately fail-fast by default.
+- Requests may opt into a finite waiting queue with
+  `X-AI-Core-Wait-Ms: 1..30000`. The shared Coordinator enforces a
+  maximum 64 queued requests, FIFO turn-taking, and a monotonic deadline.
+- A timed-out request returns 429 `ADMISSION_DEADLINE_EXPIRED`; a full queue
+  returns 429 `ADMISSION_QUEUE_FULL`. The queue never owns a model lease
+  or inference slot until a request is actually admitted.
+- This is a bounded first implementation of queue admission, not proof of
+  two-product weighted fairness, cancellation-on-disconnect, or crash recovery.
+
 ## Temporary handoff
 - Begin: authenticated POST /internal/handoff/begin to the old model's
   loopback gate, body with target, owner and ttl.
