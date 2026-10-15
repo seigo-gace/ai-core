@@ -337,6 +337,28 @@ class CoordinatorTests(unittest.TestCase):
         self.assertLessEqual(len(driver.loaded),2)
         self.assertIn('granite',driver.loaded)
 
+    def test_nonresident_source_abort_reclaims_target(self):
+        driver = FakeDriver(('qwen3','ministral'))
+        coordinator = Coordinator(specs(),driver,handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27, 'selected_cpu_ceiling':6})
+        state = coordinator.handoff_begin('coder','granite','project-a')
+        self.assertEqual(len(driver.loaded),3)
+        coordinator.handoff_finish('project-a',completed=False,ticket=state['ticket'])
+        self.assertEqual(driver.loaded,{'qwen3','ministral'})
+        self.assertIsNone(coordinator.handoff)
+
+    def test_nonresident_source_expiry_reclaims_target(self):
+        driver = FakeDriver(('qwen3','ministral'))
+        now = [100.0]
+        coordinator = Coordinator(specs(),driver,clock=lambda:now[0],
+                                  handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27, 'selected_cpu_ceiling':6})
+        coordinator.handoff_begin('coder','granite','project-a',ttl=2)
+        now[0]=103.0
+        self.assertTrue(coordinator.handoff_expire())
+        self.assertEqual(driver.loaded,{'qwen3','ministral'})
+        self.assertIsNone(coordinator.handoff)
+
     def test_handoff_ticket_prevents_cross_project_completion(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {
