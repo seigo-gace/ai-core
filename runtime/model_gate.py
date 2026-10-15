@@ -294,56 +294,58 @@ class Coordinator:
     def acquire(self, model):
         if model not in self.specs:
             raise AdmissionError(404, 'UNKNOWN_MODEL')
-        if not self.semaphore.acquire(blocking=False):
-            raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
-        try:
-            spec = self.specs[model]
-            previous = None
-            with self.lock:
-                if self.active[model]:
-                    raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
-                if model in self.transitioning:
-                    raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
-                if self.driver.running(spec):
-                    self.active[model] += 1
-                    self.used[model] = self.clock()
-                    return model
-                if self.observe_only:
-                    raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
-                if self.transitioning or self.handoff is not None:
-                    raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
-                # Reserve the one permitted cold transition, then release the
-                # global mutex during slow Docker start/model readiness.
-                previous = self.running()
-                self.transitioning.add(model)
-            try:
-                with self.lock:
-                    self._make_room(model)
-                self.driver.start(spec)
-                deadline = self.clock() + self.start_timeout
-                while self.clock() < deadline:
-                    if self.driver.healthy(spec):
-                        break
-                    time.sleep(0.4)
-                else:
-                    raise AdmissionError(503, 'MODEL_START_TIMEOUT')
-                with self.lock:
-                    self.active[model] += 1
-                    self.used[model] = self.clock()
+        spec = self.specs[model]
+        previous = None
+        semaphore_acquired = False
+        with self.lock:
+            if self.active[model]:
+                raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
+            if model in self.transitioning:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            if self.driver.running(spec):
+                if not self.semaphore.acquire(blocking=False):
+                    raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+                self.active[model] += 1
+                self.used[model] = self.clock()
                 return model
-            except BaseException:
-                with self.lock:
-                    try:
-                        self._restore_previous(model, previous)
-                    except Exception as error:
-                        raise AdmissionError(503, 'MODEL_START_ROLLBACK_FAILED') from error
-                raise
-            finally:
-                with self.lock:
-                    self.transitioning.discard(model)
+            if self.observe_only:
+                raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
+            if self.transitioning or self.handoff is not None:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            # A cold-load reservation is not an active inference lease.
+            # Do not occupy the global inference slots during Docker startup.
+            previous = self.running()
+            self.transitioning.add(model)
+        try:
+            with self.lock:
+                self._make_room(model)
+            self.driver.start(spec)
+            deadline = self.clock() + self.start_timeout
+            while self.clock() < deadline:
+                if self.driver.healthy(spec):
+                    break
+                time.sleep(0.4)
+            else:
+                raise AdmissionError(503, 'MODEL_START_TIMEOUT')
+            with self.lock:
+                if not self.semaphore.acquire(blocking=False):
+                    raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+                semaphore_acquired = True
+                self.active[model] += 1
+                self.used[model] = self.clock()
+            return model
         except BaseException:
-            self.semaphore.release()
+            if semaphore_acquired:
+                self.semaphore.release()
+            with self.lock:
+                try:
+                    self._restore_previous(model, previous)
+                except Exception as error:
+                    raise AdmissionError(503, 'MODEL_START_ROLLBACK_FAILED') from error
             raise
+        finally:
+            with self.lock:
+                self.transitioning.discard(model)
 
     def release(self, model):
         with self.lock:
