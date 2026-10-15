@@ -231,6 +231,8 @@ class Coordinator:
         self.active = {name:0 for name in specs}
         self.used = {name:None for name in specs}
         self.semaphore = threading.BoundedSemaphore(max_active)
+        self.wait_condition = threading.Condition(self.lock)
+        self.waiters = []  # bounded FIFO for requests that explicitly opt into waiting
         self.handoff = None  # bounded, single temporary third-model slot
         self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
 
@@ -363,10 +365,40 @@ class Coordinator:
             self.active[model] -= 1
             self.used[model] = self.clock()
             self.semaphore.release()
+            self.wait_condition.notify_all()
+
+    def acquire_wait(self, model, wait_seconds=0):
+        # An explicit deadline bounds queue memory and prevents indefinite
+        # blocked HTTP workers. No additional resource manager is created.
+        if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 30:
+            raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+        if not wait_seconds:
+            return self.acquire(model)
+        deadline = self.clock() + wait_seconds
+        ticket = object()
+        with self.wait_condition:
+            if len(self.waiters) >= 64:
+                raise AdmissionError(429, 'ADMISSION_QUEUE_FULL')
+            self.waiters.append(ticket)
+            try:
+                while True:
+                    remaining = deadline - self.clock()
+                    if remaining <= 0:
+                        raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
+                    if self.waiters[0] is ticket:
+                        try:
+                            return self.acquire(model)
+                        except AdmissionError as error:
+                            if error.status != 429:
+                                raise
+                    self.wait_condition.wait(timeout=min(remaining, 0.25))
+            finally:
+                self.waiters.remove(ticket)
+                self.wait_condition.notify_all()
 
     @contextlib.contextmanager
-    def lease(self, model):
-        self.acquire(model)
+    def lease(self, model, wait_seconds=0):
+        self.acquire_wait(model, wait_seconds)
         try:
             yield self.specs[model]
         finally:
@@ -676,7 +708,13 @@ def make_handler(coordinator, model, api_key):
                 obj['model'] = target_id
                 body = json.dumps(obj,ensure_ascii=False).encode('utf-8')
                 stream_headers_sent = False
-                with coordinator.lease(model) as spec:
+                wait_raw = self.headers.get('X-AI-Core-Wait-Ms', '0')
+                if not re.fullmatch(r'[0-9]{1,5}', wait_raw):
+                    raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+                wait_ms = int(wait_raw)
+                if wait_ms > 30000:
+                    raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+                with coordinator.lease(model, wait_seconds=wait_ms / 1000) as spec:
                     conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=600)
                     try:
                         conn.request('POST','/v1/chat/completions',body=body,
