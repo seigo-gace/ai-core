@@ -352,12 +352,15 @@ class Coordinator:
                 self.transitioning.discard(model)
 
     def release(self, model):
+        # Keep the model lease count and global inference slot in sync.
+        # Releasing outside the lock briefly exposed an idle model while the
+        # global slot was still unavailable to the next request.
         with self.lock:
             if self.active[model] <= 0:
                 raise RuntimeError('DOUBLE_RELEASE')
             self.active[model] -= 1
             self.used[model] = self.clock()
-        self.semaphore.release()
+            self.semaphore.release()
 
     @contextlib.contextmanager
     def lease(self, model):
