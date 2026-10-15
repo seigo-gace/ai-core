@@ -827,7 +827,10 @@ class GateHttpTests(unittest.TestCase):
                     self.wfile.write(output)
                     return
                 output=json.dumps({'choices':[{'message':{'content':data['model']}}]}).encode()
+                if data.get('messages', [{}])[0].get('content') == 'invalid-json':
+                    output=b'{invalid json'
                 self.send_response(200)
+                self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length',str(len(output)))
                 self.end_headers()
                 self.wfile.write(output)
@@ -872,6 +875,15 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
         self.assertEqual(self.coord.active['coder'],0)
+    def test_malformed_upstream_json_never_returns_success(self):
+        status,data=self.req('/v1/chat/completions',
+                             {'model':'/models/coder.gguf',
+                              'messages':[{'role':'user','content':'invalid-json'}],
+                              'stream':False})
+        self.assertEqual(status,502)
+        self.assertEqual(data['error']['code'],'UPSTREAM_JSON_CONTRACT_INVALID')
+        self.assertEqual(self.coord.active['coder'],0)
+
     def test_upstream_protocol_disconnect_returns_503_and_releases_lease(self):
         # A backend that disconnects before an HTTP response must not leave
         # the HTTP handler silent or strand the shared inference slot.
