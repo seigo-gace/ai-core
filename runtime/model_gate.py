@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Local, per-model OpenAI-compatible gates for existing AI Core Compose services.
 
-No Docker commands run at import or validation time. Serving requires an
-explicitly confirmed exclusive-traffic cutover; the legacy router may not
-continue bypassing model leases when eviction is enabled.
+No Docker commands run at import or validation time. The legacy 18080
+router is retired; inference enters only the exclusive model Gate.
 """
 import argparse
 import contextlib
@@ -219,13 +218,12 @@ class ExistingContainerDriver:
 class Coordinator:
     """All model-specific API listeners share one lease/capacity owner."""
     def __init__(self, specs, driver, max_loaded=2, max_active=2, idle_seconds=120,
-                 start_timeout=180, clock=time.monotonic, observe_only=False,
+                 start_timeout=180, clock=time.monotonic,
                  handoff_budget_check=None):
         if not (1 <= max_loaded <= len(specs) and 1 <= max_active <= max_loaded):
             raise ValueError('INVALID_ADMISSION_LIMITS')
         self.specs, self.driver = specs, driver
         self.max_loaded, self.max_active = max_loaded, max_active
-        self.observe_only = observe_only
         self.transitioning = set()  # cold-loading model; prohibit another cold transition
         self.idle_seconds, self.start_timeout, self.clock = idle_seconds, start_timeout, clock
         self.lock = threading.RLock()
@@ -244,15 +242,14 @@ class Coordinator:
         """Never implicitly kill legacy production processes on gate startup."""
         with self.lock:
             loaded = self.running()
-            if len(loaded) > self.max_loaded and not self.observe_only:
+            if len(loaded) > self.max_loaded:
                 raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
             # Inherited ready residents must enter the same idle TTL policy
             # as models first loaded by this coordinator.
-            if not self.observe_only:
-                started = self.clock()
-                for name in loaded:
-                    if self.used[name] is None:
-                        self.used[name] = started
+            started = self.clock()
+            for name in loaded:
+                if self.used[name] is None:
+                    self.used[name] = started
             return loaded
 
     def _make_room(self, target):
@@ -313,8 +310,6 @@ class Coordinator:
                 self.active[model] += 1
                 self.used[model] = self.clock()
                 return model
-            if self.observe_only:
-                raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
             if self.transitioning or self.handoff is not None:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
             # Avoid a pointless cold start when every inference slot is
@@ -459,8 +454,6 @@ class Coordinator:
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 1 <= ttl <= 600:
             raise AdmissionError(422, 'INVALID_HANDOFF_TTL')
         with self.lock:
-            if self.observe_only:
-                raise AdmissionError(409, 'OBSERVE_ONLY_NO_HANDOFF')
             if self.handoff or self.transitioning:
                 raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
             loaded = self.running()
@@ -583,7 +576,7 @@ class Coordinator:
         """
         for _ in range(2 * len(self.specs)):
             with self.lock:
-                if self.observe_only or self.transitioning or self.handoff:
+                if self.transitioning or self.handoff:
                     return
                 loaded = self.running()
                 choice = None
@@ -667,9 +660,6 @@ def make_handler(coordinator, model, api_key):
                 return
             if self.path in ('/internal/handoff/begin', '/internal/handoff/complete',
                              '/internal/handoff/abort'):
-                if coordinator.observe_only:
-                    self._send(409, {'error': {'code': 'OBSERVE_ONLY_NO_HANDOFF'}})
-                    return
                 try:
                     length = int(self.headers.get('Content-Length', '-1'))
                     if not 1 <= length <= 4096:
@@ -698,12 +688,6 @@ def make_handler(coordinator, model, api_key):
                 return
             if self.path != '/v1/chat/completions':
                 self._send(404,{'error':{'code':'NOT_FOUND'}})
-                return
-            # A parallel legacy router holds no model-gate lease. During the
-            # four-resident compatibility stage, probes may inspect /v1/models
-            # but may not dispatch unleased inference to -np 1 backends.
-            if coordinator.observe_only:
-                self._send(409,{'error':{'code':'OBSERVE_ONLY_NO_INFERENCE'}})
                 return
             try:
                 length = int(self.headers.get('Content-Length','-1'))
@@ -927,8 +911,7 @@ def main(argv=None):
     driver = ExistingContainerDriver(args.compose)
     coordinator = Coordinator(specs,driver,max_loaded=policy['max_resident'],
                               max_active=policy['max_active'],
-                              idle_seconds=policy['idle_seconds'],
-                              observe_only=False)
+                              idle_seconds=policy['idle_seconds'])
     print('MODEL_GATE_MODE=EXCLUSIVE_RESIDENCY')
     run_servers(coordinator,key,args.state_dir)
     return 0
