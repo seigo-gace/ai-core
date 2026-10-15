@@ -318,6 +318,25 @@ class CoordinatorTests(unittest.TestCase):
                 self.assertIn('granite',driver.loaded)
                 self.assertIsNone(coordinator.handoff)
 
+    def test_nonresident_source_handoff_waits_for_foreign_lease(self):
+        driver = FakeDriver(('qwen3','ministral'))
+        coordinator = Coordinator(specs(),driver,handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27, 'selected_cpu_ceiling':6})
+        state = coordinator.handoff_begin('coder','granite','project-a')
+        coordinator.acquire('qwen3')
+        coordinator.acquire('ministral')
+        try:
+            with self.assertRaisesRegex(AdmissionError,'HANDOFF_MODEL_LEASED'):
+                coordinator.handoff_finish('project-a',ticket=state['ticket'])
+            self.assertEqual(driver.loaded,{'qwen3','ministral','granite'})
+            self.assertIsNotNone(coordinator.handoff)
+        finally:
+            coordinator.release('qwen3')
+            coordinator.release('ministral')
+        coordinator.handoff_finish('project-a',ticket=state['ticket'])
+        self.assertLessEqual(len(driver.loaded),2)
+        self.assertIn('granite',driver.loaded)
+
     def test_handoff_ticket_prevents_cross_project_completion(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {
