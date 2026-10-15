@@ -476,6 +476,8 @@ class Coordinator:
                 raise AdmissionError(404, 'HANDOFF_NOT_OWNED')
             if ticket is not None and not hmac.compare_digest(state['ticket'], ticket):
                 raise AdmissionError(403, 'HANDOFF_TICKET_INVALID')
+            if state['expires'] is None:
+                raise AdmissionError(429, 'HANDOFF_NOT_READY')
             if self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
             victim = state['from'] if completed else (state['to'] if state.get('started_target') else None)
