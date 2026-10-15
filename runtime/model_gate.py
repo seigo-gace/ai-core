@@ -312,6 +312,10 @@ class Coordinator:
                 raise AdmissionError(503, 'OBSERVE_ONLY_MODEL_NOT_RUNNING')
             if self.transitioning or self.handoff is not None:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            # Avoid a pointless cold start when every inference slot is
+            # already leased; no slot is held while the model actually loads.
+            if sum(self.active.values()) >= self.max_active:
+                raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
             # A cold-load reservation is not an active inference lease.
             # Do not occupy the global inference slots during Docker startup.
             previous = self.running()
