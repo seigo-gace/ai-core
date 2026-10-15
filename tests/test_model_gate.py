@@ -303,6 +303,20 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual([op for op,_ in driver.ops if op=='start'],
                          ['start']*4)
 
+    def test_handoff_from_nonresident_at_zero_one_two_residents(self):
+        # Handoff identifies two model names, not two pre-running processes.
+        for initially_running in ((), ('qwen3',), ('qwen3','ministral')):
+            with self.subTest(running=initially_running):
+                driver = FakeDriver(initially_running)
+                coordinator = Coordinator(specs(), driver, handoff_budget_check=lambda: {
+                    'selected_memory_ceiling':27, 'selected_cpu_ceiling':6})
+                handoff = coordinator.handoff_begin('coder','granite','project-a')
+                self.assertIn('granite',driver.loaded)
+                self.assertLessEqual(len(driver.loaded),3)
+                coordinator.handoff_finish('project-a',ticket=handoff['ticket'])
+                self.assertLessEqual(len(driver.loaded),2)
+                self.assertIsNone(coordinator.handoff)
+
     def test_handoff_ticket_prevents_cross_project_completion(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {
