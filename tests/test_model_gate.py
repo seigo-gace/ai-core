@@ -749,7 +749,7 @@ class ExistingContainerTests(unittest.TestCase):
             'Config':{'Cmd':['-m','/models/coder.gguf','--cache-ram','4096'],
                       'Labels':{'com.docker.compose.project':'ai-core',
                                 'com.docker.compose.service':'coder'}},
-            'HostConfig':{'CgroupParent':'ai-core.slice',
+            'HostConfig':{'RestartPolicy':{'Name':'no'},'CgroupParent':'ai-core.slice',
                           'Memory':9216000000,'NanoCpus':3000000000,
                           'PortBindings':{'8080/tcp':[{'HostIp':'127.0.0.1',
                                                       'HostPort':'20003'}]}}
@@ -786,6 +786,16 @@ class ExistingContainerTests(unittest.TestCase):
                         self.driver.start(self.spec)
                 finally:
                     self.record['HostConfig'][field]=original
+    def test_autorestart_backend_is_rejected(self):
+        def run(args,**kwargs):
+            return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
+        with patch('runtime.model_gate.subprocess.run',side_effect=run):
+            self.record['HostConfig']['RestartPolicy']['Name']='unless-stopped'
+            with self.assertRaisesRegex(AdmissionError,'BACKEND_RESTART_POLICY_NOT_MANAGED'):
+                self.driver.running(self.spec)
+            self.record['HostConfig']['RestartPolicy']['Name']='no'
+            self.assertFalse(self.driver.running(self.spec))
+
     def test_container_identity_and_loopback_protected(self):
         def run(args,**kwargs):
             return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
