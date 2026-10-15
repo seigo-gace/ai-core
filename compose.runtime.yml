@@ -11,7 +11,7 @@ services:
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
-    restart: unless-stopped
+    restart: "no"
 
   qwen3:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -25,7 +25,7 @@ services:
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
-    restart: unless-stopped
+    restart: "no"
 
   ministral:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -39,7 +39,7 @@ services:
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
-    restart: unless-stopped
+    restart: "no"
 
   coder:
     image: ghcr.io/ggml-org/llama.cpp:server
@@ -53,24 +53,4 @@ services:
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
-    restart: unless-stopped
-
-  router:
-    profiles: ["legacy-disabled"]
-    image: router-llama-swap
-    container_name: ai-llama-router
-    network_mode: host
-    env_file: ./router/.env.router
-    user: "65532:65532"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    pids_limit: 128
-    cpus: 0.5
-    cpuset: "0-5"
-    mem_limit: 256m
-    memswap_limit: 512m
-    restart: unless-stopped
-    volumes:
-      - ./router/config/config.generated.yaml:/etc/llama-swap/config.yaml:ro
-    command: ["-config","/etc/llama-swap/config.yaml","-listen","127.0.0.1:18080","-watch-config=false"]
+    restart: "no"
