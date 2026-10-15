@@ -145,6 +145,19 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(released.is_set())
         self.assertEqual(c.active['coder'],0)
 
+    def test_fail_fast_cannot_overtake_waiting_admission(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        queued=object()
+        with c.wait_condition:
+            c.waiters.append(queued)
+        try:
+            with self.assertRaisesRegex(AdmissionError,'ADMISSION_QUEUE_BUSY'):
+                c.acquire_wait('coder',wait_seconds=0)
+            self.assertEqual(c.active['coder'],0)
+        finally:
+            with c.wait_condition:
+                c.waiters.remove(queued)
+
     def test_waiting_queue_rejects_over_capacity_without_leak(self):
         c=Coordinator(specs(),FakeDriver(('coder',)))
         c.waiters=[object() for _ in range(64)]
