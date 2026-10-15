@@ -231,6 +231,39 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(controller.transitioning,set())
         self.assertEqual(len(driver.loaded),2)
 
+    def test_slow_cold_start_does_not_consume_ready_inference_capacity(self):
+        loading = threading.Event()
+        continue_start = threading.Event()
+        errors = []
+        class SlowStart(FakeDriver):
+            def start(self, spec):
+                loading.set()
+                if not continue_start.wait(3):
+                    raise TimeoutError('cold start stalled')
+                super().start(spec)
+        driver = SlowStart(('coder',))
+        coordinator = Coordinator(specs(), driver, max_active=1)
+        def cold():
+            try:
+                with coordinator.lease('granite'):
+                    pass
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=cold, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(loading.wait(2))
+            with coordinator.lease('coder'):
+                self.assertEqual(coordinator.active['coder'], 1)
+            self.assertEqual(coordinator.active['granite'], 0)
+        finally:
+            continue_start.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(coordinator.active['granite'], 0)
+        self.assertEqual(coordinator.transitioning, set())
+
     def test_idle_unload_does_not_hold_lock_for_ready_warm_request(self):
         stopped=threading.Event()
         allow_stop=threading.Event()
