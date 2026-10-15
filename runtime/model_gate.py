@@ -6,6 +6,7 @@ router is retired; inference enters only the exclusive model Gate.
 """
 import argparse
 import contextlib
+import hashlib
 import fcntl
 import hmac
 import http.client
@@ -633,6 +634,17 @@ def make_handler(coordinator, model, api_key):
                 return
             if not self._auth():
                 self._send(401,{'error':{'code':'UNAUTHORIZED'}})
+                return
+            if self.path == '/internal/source/status':
+                # Source fingerprint is computed from the executing file,
+                # rather than accepted from an environment variable or PR.
+                try:
+                    digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+                except OSError:
+                    self._send(503, {'error': {'code': 'SOURCE_FINGERPRINT_UNAVAILABLE'}})
+                    return
+                self._send(200, {'source_sha256': digest,
+                                 'gate_model': model})
                 return
             if self.path == '/internal/handoff/status':
                 with coordinator.lock:
