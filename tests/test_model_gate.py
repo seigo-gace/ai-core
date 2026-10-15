@@ -359,6 +359,27 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(driver.loaded,{'qwen3','ministral'})
         self.assertIsNone(coordinator.handoff)
 
+    def test_nonresident_source_stop_failure_retains_reservation(self):
+        class FailingStop(FakeDriver):
+            fail_stop = True
+            def stop(self, spec):
+                if self.fail_stop and spec['service'] != 'granite':
+                    raise OSError('temporary stop failure')
+                super().stop(spec)
+        driver = FailingStop(('qwen3','ministral'))
+        coordinator = Coordinator(specs(),driver,handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
+        state = coordinator.handoff_begin('coder','granite','project-a')
+        with self.assertRaisesRegex(OSError,'temporary stop failure'):
+            coordinator.handoff_finish('project-a',ticket=state['ticket'])
+        self.assertEqual(len(driver.loaded),3)
+        self.assertIsNotNone(coordinator.handoff)
+        driver.fail_stop = False
+        coordinator.handoff_finish('project-a',ticket=state['ticket'])
+        self.assertIn('granite',driver.loaded)
+        self.assertLessEqual(len(driver.loaded),2)
+        self.assertIsNone(coordinator.handoff)
+
     def test_handoff_ticket_prevents_cross_project_completion(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {
