@@ -837,22 +837,18 @@ def main(argv=None):
     parser.add_argument('--preflight',action='store_true')
     parser.add_argument('--serve',action='store_true')
     parser.add_argument('--exclusive-traffic',action='store_true')
-    parser.add_argument('--observe-only',action='store_true',
-                        help='never start/stop models; allow legacy 4-resident Host')
     parser.add_argument('--state-dir',default='/home/admin1/projects/ai-core/.ai-core')
     args = parser.parse_args(argv)
     if args.preflight == args.serve:
         parser.error('choose exactly one of --preflight or --serve')
-    if args.observe_only and (not args.serve or args.exclusive_traffic):
-        parser.error('--observe-only is a non-mutating --serve mode only')
     policy = load_policy(args.policy)
     specs = model_specs_from_compose(args.compose,policy)
     if args.preflight:
         print('MODEL_GATE_PREFLIGHT=PASS MODEL_COUNT='+str(len(specs))+
               ' PORTS='+','.join(str(x['gate_port']) for x in specs.values()))
         return 0
-    if not (args.exclusive_traffic or args.observe_only):
-        parser.error('--serve requires --exclusive-traffic or --observe-only')
+    if not args.exclusive_traffic:
+        parser.error('--serve requires --exclusive-traffic')
     key = os.environ.get('LLAMA_SWAP_API_KEY','')
     if len(key) < 16:
         parser.error('existing LLAMA_SWAP_API_KEY environment must be configured')
@@ -863,9 +859,8 @@ def main(argv=None):
     coordinator = Coordinator(specs,driver,max_loaded=policy['max_resident'],
                               max_active=policy['max_active'],
                               idle_seconds=policy['idle_seconds'],
-                              observe_only=args.observe_only)
-    print('MODEL_GATE_MODE='+('OBSERVE_ONLY_NO_LIFECYCLE' if args.observe_only
-                              else 'EXCLUSIVE_RESIDENCY'))
+                              observe_only=False)
+    print('MODEL_GATE_MODE=EXCLUSIVE_RESIDENCY')
     run_servers(coordinator,key,args.state_dir)
     return 0
 
