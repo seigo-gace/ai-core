@@ -818,6 +818,8 @@ class GateHttpTests(unittest.TestCase):
                             b'data: [DONE]\n\n')
                     if data.get('messages', [{}])[0].get('content') == 'false-done':
                         output=(b'data: {"choices":[{"delta":{"content":"[DONE]"}}]}\n\n')
+                    if data.get('messages', [{}])[0].get('content') == 'after-done':
+                        output += b'data: {"choices":[{"delta":{"content":"late"}}]}\n\n'
                     self.send_response(200)
                     self.send_header('Content-Type','text/event-stream')
                     self.send_header('Content-Length',str(len(output)))
@@ -1039,6 +1041,18 @@ class GateHttpTests(unittest.TestCase):
             stream=resp.read()
         self.assertIn(b'"[DONE]"',stream)
         self.assertIn(b'UPSTREAM_STREAM_INCOMPLETE',stream)
+        self.assertEqual(self.coord.active['coder'],0)
+
+    def test_stream_rejects_content_after_done(self):
+        payload={'model':'/models/coder.gguf','stream':True,
+                 'messages':[{'role':'user','content':'after-done'}]}
+        req=request.Request(self.base+'/v1/chat/completions',
+            method='POST',data=json.dumps(payload).encode(),
+            headers={'Authorization':'Bearer EXISTING_TEST_KEY_12345',
+                     'Content-Type':'application/json'})
+        with request.urlopen(req,timeout=3) as resp:
+            stream=resp.read()
+        self.assertIn(b'UPSTREAM_STREAM_AFTER_DONE',stream)
         self.assertEqual(self.coord.active['coder'],0)
 
     def test_stream_sse_under_shared_lease(self):
