@@ -4,7 +4,6 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
-from types import SimpleNamespace
 from urllib import request
 from runtime.model_gate import Coordinator, make_handler
 
@@ -49,7 +48,7 @@ class SSEHeadersRegression(unittest.TestCase):
                 data=payload, method='POST',
                 headers={'Authorization':'Bearer local-test-secret',
                          'Content-Type':'application/json'})
-            with patch('runtime.model_gate.http', SimpleNamespace(client=SimpleNamespace(HTTPConnection=Connection))):
+            with patch('runtime.model_gate.UpstreamConnection', Connection):
                 with request.urlopen(req, timeout=3) as response:
                     body = response.read()
                     self.assertEqual(response.status, 200)
