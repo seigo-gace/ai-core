@@ -714,6 +714,12 @@ def make_handler(coordinator, model, api_key):
                                     elif line == b'' and awaiting_done_terminator:
                                         done = True
                                         awaiting_done_terminator = False
+                                    elif done and line.strip():
+                                        # A terminal event must be the final event.
+                                        # Additional upstream content cannot inherit success.
+                                        done = False
+                                        stream_error = 'UPSTREAM_STREAM_AFTER_DONE'
+                                        awaiting_done_terminator = False
                                     else:
                                         awaiting_done_terminator = False
                                 self.wfile.write(chunk)
