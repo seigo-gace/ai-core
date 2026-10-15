@@ -35,7 +35,10 @@ class StreamContractTests(unittest.TestCase):
     def test_oversize_reports_error(self):
         self.assertIn(b'UPSTREAM_STREAM_TOO_LARGE',self.probe(b'x'*50,20))
     def test_done_marker_has_no_error(self):
-        data=self.probe(b'data: [DONE]')
+        data=self.probe(b'data: [DONE]\n\n')
         self.assertNotIn(b'event: error',data)
+    def test_truncated_done_marker_is_not_a_success(self):
+        data=self.probe(b'data: [DONE]')
+        self.assertIn(b'UPSTREAM_STREAM_INCOMPLETE', data)
 
 if __name__=='__main__': unittest.main()
