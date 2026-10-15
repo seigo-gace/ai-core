@@ -10,6 +10,7 @@ import fcntl
 import hmac
 import http.client
 from http.client import HTTPException as UpstreamHTTPException
+from http.client import HTTPConnection as UpstreamConnection
 import json
 import os
 import re
@@ -205,7 +206,7 @@ class ExistingContainerDriver:
 
     def healthy(self, spec):
         try:
-            conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=3)
+            conn = UpstreamConnection('127.0.0.1',spec['backend_port'],timeout=3)
             conn.request('GET','/health')
             response = conn.getresponse()
             response.read(4096)
