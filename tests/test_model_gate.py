@@ -839,6 +839,8 @@ class GateHttpTests(unittest.TestCase):
                 output=json.dumps({'choices':[{'message':{'content':data['model']}}]}).encode()
                 if data.get('messages', [{}])[0].get('content') == 'invalid-json':
                     output=b'{invalid json'
+                if data.get('messages', [{}])[0].get('content') == 'empty-choices':
+                    output=b'{"choices":[]}'
                 self.send_response(200)
                 self.send_header('Content-Type','application/json')
                 if data.get('messages', [{}])[0].get('content') == 'invalid-length':
@@ -895,6 +897,15 @@ class GateHttpTests(unittest.TestCase):
                               'stream':False})
         self.assertEqual(status,502)
         self.assertEqual(data['error']['code'],'UPSTREAM_JSON_CONTRACT_INVALID')
+        self.assertEqual(self.coord.active['coder'],0)
+
+    def test_empty_upstream_completion_returns_502_and_releases_lease(self):
+        status,data=self.req('/v1/chat/completions',
+                             {'model':'/models/coder.gguf',
+                              'messages':[{'role':'user','content':'empty-choices'}],
+                              'stream':False})
+        self.assertEqual(status,502)
+        self.assertEqual(data['error']['code'],'UPSTREAM_COMPLETION_CONTRACT_INVALID')
         self.assertEqual(self.coord.active['coder'],0)
 
     def test_malformed_upstream_http_framing_returns_502_and_releases_lease(self):
