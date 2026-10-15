@@ -411,7 +411,7 @@ class Coordinator:
             if self.handoff or self.transitioning:
                 raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
             loaded = self.running()
-            if previous not in loaded or len(loaded) > self.max_loaded:
+            if len(loaded) > self.max_loaded:
                 raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
             needs_start = target not in loaded
             if len(loaded) + int(needs_start) > 3:
