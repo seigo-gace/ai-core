@@ -145,6 +145,15 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(released.is_set())
         self.assertEqual(c.active['coder'],0)
 
+    def test_waiting_queue_rejects_over_capacity_without_leak(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        c.waiters=[object() for _ in range(64)]
+        with self.assertRaisesRegex(AdmissionError,'ADMISSION_QUEUE_FULL'):
+            c.acquire_wait('coder',wait_seconds=0.01)
+        self.assertEqual(len(c.waiters),64)
+        with self.assertRaisesRegex(AdmissionError,'INVALID_WAIT_DEADLINE'):
+            c.acquire_wait('coder',wait_seconds=-1)
+
     def test_finite_wait_deadline_reclaims_queue(self):
         c=Coordinator(specs(),FakeDriver(('coder',)))
         with c.lease('coder'):
