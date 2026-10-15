@@ -368,8 +368,8 @@ class Coordinator:
             self.wait_condition.notify_all()
 
     def acquire_wait(self, model, wait_seconds=0):
-        # An explicit deadline bounds queue memory and prevents indefinite
-        # blocked HTTP workers. No additional resource manager is created.
+        # Explicit opt-in, bounded FIFO; no active slot is reserved while
+        # requests wait, and slow Docker transitions run outside the queue lock.
         if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 30:
             raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
         if not wait_seconds:
@@ -380,19 +380,28 @@ class Coordinator:
             if len(self.waiters) >= 64:
                 raise AdmissionError(429, 'ADMISSION_QUEUE_FULL')
             self.waiters.append(ticket)
-            try:
-                while True:
+        try:
+            while True:
+                with self.wait_condition:
                     remaining = deadline - self.clock()
                     if remaining <= 0:
                         raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
-                    if self.waiters[0] is ticket:
-                        try:
-                            return self.acquire(model)
-                        except AdmissionError as error:
-                            if error.status != 429:
-                                raise
-                    self.wait_condition.wait(timeout=min(remaining, 0.25))
-            finally:
+                    if self.waiters[0] is not ticket:
+                        self.wait_condition.wait(timeout=min(remaining, 0.25))
+                        continue
+                # The Coordinator's own lock must remain independently
+                # releasable throughout cold start, eviction and readiness.
+                try:
+                    return self.acquire(model)
+                except AdmissionError as error:
+                    if error.status != 429:
+                        raise
+                with self.wait_condition:
+                    remaining = deadline - self.clock()
+                    if remaining > 0:
+                        self.wait_condition.wait(timeout=min(remaining, 0.25))
+        finally:
+            with self.wait_condition:
                 self.waiters.remove(ticket)
                 self.wait_condition.notify_all()
 
