@@ -239,7 +239,7 @@ class Coordinator:
         return {name for name,spec in self.specs.items() if self.driver.running(spec)}
 
     def preflight(self):
-        """Never implicitly kill legacy production processes on gate startup."""
+        """Reject over-capacity inherited residents; never evict them on startup."""
         with self.lock:
             loaded = self.running()
             if len(loaded) > self.max_loaded:
