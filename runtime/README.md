@@ -6,7 +6,7 @@ This file describes a development candidate, not a production deployment.
 ## Normal operation
 - Four backend identities remain addressable; normal resident count <=2.
 - Admission leases protect models in use; global active requests <=2.
-- Idle backends release memory when safe. Legacy 18080 remains protected.
+- Idle backends release memory when safe. The legacy 18080 router is retired: it is never started, proxied through, or used as an operational fallback. All inference requests must acquire a lease through the shared Coordinator and model-specific Gate.
 
 ## Temporary handoff
 - Begin: authenticated POST /internal/handoff/begin to the old model's
@@ -29,7 +29,8 @@ must not be logged. Publicly accessible ports are not commissioned.
 ## Verification and deployment limits
 - Current exact-source tests use FakeDriver and temporary HTTP loopback.
 - This does not prove real model RAM reclaim or production readiness.
-- Do not switch the four legacy residents until consumer exclusivity,
-  applicable Host registry admission and reversible deployment are
-  verified. Reuse existing Compose-owned containers. Do not grant the
+- Do not start the retired 18080 router. Before stopping any model, prove
+  that active callers use the new authenticated Gate and no unleased direct
+  backend client is active. Verify applicable Host admission and deployment
+  readiness. Reuse existing Compose-owned containers. Do not grant the
   router Docker socket access or increase the 36 GiB/6-core ceilings.
