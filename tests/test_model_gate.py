@@ -125,6 +125,35 @@ class SourceTests(unittest.TestCase):
 
 
 class CoordinatorTests(unittest.TestCase):
+    def test_finite_wait_released_by_prior_lease(self):
+        import time
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        acquired=threading.Event()
+        released=threading.Event()
+        with c.lease('coder'):
+            def worker():
+                with c.lease('coder',wait_seconds=2):
+                    acquired.set()
+                released.set()
+            t=threading.Thread(target=worker)
+            t.start()
+            time.sleep(0.08)
+            self.assertFalse(acquired.is_set())
+        t.join(timeout=2)
+        self.assertFalse(t.is_alive())
+        self.assertTrue(acquired.is_set())
+        self.assertTrue(released.is_set())
+        self.assertEqual(c.active['coder'],0)
+
+    def test_finite_wait_deadline_reclaims_queue(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        with c.lease('coder'):
+            with self.assertRaisesRegex(AdmissionError,'ADMISSION_DEADLINE_EXPIRED'):
+                c.acquire_wait('coder',wait_seconds=0.03)
+        self.assertEqual(c.waiters,[])
+        self.assertEqual(c.active['coder'],0)
+
+
     def test_old_four_resident_not_stopped_automatically(self):
         d=FakeDriver(specs())
         c=Coordinator(specs(),d)
