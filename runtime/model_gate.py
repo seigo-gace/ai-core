@@ -743,6 +743,18 @@ def make_handler(coordinator, model, api_key):
                             upstream = response.read(MAX_RESPONSE_BYTES+1)
                             if len(upstream) > MAX_RESPONSE_BYTES:
                                 raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            # Do not turn a backend's malformed or truncated
+                            # body into a successful OpenAI-compatible reply.
+                            # Validate while the lease is still held, before
+                            # emitting the client response headers.
+                            if not response.getheader('Content-Type','').lower().split(';',1)[0].strip() == 'application/json':
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID')
+                            try:
+                                decoded = json.loads(upstream.decode('utf-8'))
+                            except (ValueError, UnicodeDecodeError) as error:
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID') from error
+                            if not isinstance(decoded,dict):
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID')
                             self.send_response(response.status)
                             self.send_header('Content-Type','application/json')
                             self.send_header('Content-Length',str(len(upstream)))
