@@ -380,6 +380,17 @@ class CoordinatorTests(unittest.TestCase):
         self.assertLessEqual(len(driver.loaded),2)
         self.assertIsNone(coordinator.handoff)
 
+    def test_pending_handoff_cannot_be_finished_early(self):
+        driver = FakeDriver(('coder','qwen3'))
+        c = Coordinator(specs(),driver,handoff_budget_check=lambda: {
+            'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
+        c.handoff = {'from':'coder','to':'qwen3','owner':'project-a',
+                     'ticket':'pending-ticket','expires':None,'started_target':False}
+        with self.assertRaisesRegex(AdmissionError,'HANDOFF_NOT_READY'):
+            c.handoff_finish('project-a',ticket='pending-ticket')
+        self.assertIsNotNone(c.handoff)
+        self.assertEqual(driver.loaded,{'coder','qwen3'})
+
     def test_handoff_ticket_prevents_cross_project_completion(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {
