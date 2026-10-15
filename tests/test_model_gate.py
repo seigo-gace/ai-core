@@ -904,6 +904,12 @@ class GateHttpTests(unittest.TestCase):
                               'stream':False})
         self.assertEqual(status,200)
         self.assertEqual(data['choices'][0]['message']['content'],'/models/coder.gguf')
+        # The HTTP response may reach the client just before the server
+        # completes its context-manager lease release.
+        import time
+        until=time.monotonic()+1
+        while self.coord.active['coder'] and time.monotonic()<until:
+            time.sleep(0.005)
         self.assertEqual(self.coord.active['coder'],0)
     def test_malformed_upstream_json_never_returns_success(self):
         status,data=self.req('/v1/chat/completions',
