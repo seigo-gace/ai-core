@@ -160,39 +160,6 @@ class CoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(AdmissionError,'EXISTING_RESIDENCY_EXCEEDS_POLICY'):
             c.preflight()
         self.assertEqual(d.ops,[])
-    def test_observe_only_accepts_legacy_four_without_stopping(self):
-        driver=FakeDriver(specs())
-        coordinator=Coordinator(specs(),driver,observe_only=True)
-        self.assertEqual(coordinator.preflight(),set(specs()))
-        with coordinator.lease('qwen3'):
-            self.assertEqual(coordinator.active['qwen3'],1)
-            coordinator.reap()
-        self.assertEqual(driver.ops,[])
-        self.assertEqual(driver.loaded,set(specs()))
-
-    def test_observe_only_denies_cold_load_without_any_mutation(self):
-        driver=FakeDriver(('coder','qwen3'))
-        coordinator=Coordinator(specs(),driver,observe_only=True)
-        self.assertEqual(len(coordinator.preflight()),2)
-        with self.assertRaisesRegex(AdmissionError,'OBSERVE_ONLY_MODEL_NOT_RUNNING'):
-            coordinator.acquire('granite')
-        self.assertEqual(driver.ops,[])
-        self.assertEqual(driver.loaded,{'coder','qwen3'})
-        with coordinator.lease('coder'):
-            self.assertEqual(coordinator.active['coder'],1)
-        self.assertEqual(coordinator.active['coder'],0)
-
-    def test_observe_only_reaper_does_not_warm_stopped_services(self):
-        driver=FakeDriver(('ministral',))
-        now=[100.0]
-        coordinator=Coordinator(specs(),driver,observe_only=True,
-                                idle_seconds=10,clock=lambda:now[0])
-        with coordinator.lease('ministral'):
-            now[0]=500.0
-        coordinator.reap()
-        self.assertEqual(driver.loaded,{'ministral'})
-        self.assertEqual(driver.ops,[])
-
     def test_cold_start_reuses_warm_slot(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d)
@@ -629,15 +596,12 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(c.handoff_expire())
         self.assertEqual(d.loaded,{'coder','qwen3'})
 
-    def test_handoff_denies_legacy_four_and_observe_only(self):
+    def test_handoff_denies_more_than_policy_residents(self):
         d=FakeDriver(specs())
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
         with self.assertRaisesRegex(AdmissionError,'HANDOFF_RESIDENCY_NOT_READY'):
             c.handoff_begin('coder','granite','p')
         self.assertEqual(d.ops,[])
-        c=Coordinator(specs(),FakeDriver(('coder','qwen3')),observe_only=True)
-        with self.assertRaisesRegex(AdmissionError,'OBSERVE_ONLY_NO_HANDOFF'):
-            c.handoff_begin('coder','granite','p')
 
     def test_reaper_does_not_relaunch_fixed_models(self):
         driver=FakeDriver(('coder',))
@@ -1011,20 +975,6 @@ class GateHttpTests(unittest.TestCase):
                 gate.server_close()
                 worker.join(timeout=1)
 
-    def test_observe_only_get_is_safe_but_post_denied(self):
-        self.coord.observe_only=True
-        status,data=self.req('/v1/models')
-        self.assertEqual(status,200)
-        self.assertEqual(data['data'][0]['id'],'/models/coder.gguf')
-        status,data=self.req('/v1/chat/completions',
-                             {'model':'/models/coder.gguf',
-                              'messages':[{'role':'user','content':'ping'}],
-                              'stream':False})
-        self.assertEqual(status,409)
-        self.assertEqual(data['error']['code'],'OBSERVE_ONLY_NO_INFERENCE')
-        self.assertEqual(self.driver.ops,[])
-        self.assertEqual(self.coord.active['coder'],0)
-
     def test_authenticated_handoff_http_ticket_and_reclaim(self):
         self.driver.loaded.add('qwen3')
         self.coord.handoff_budget_check=lambda: {
@@ -1104,14 +1054,6 @@ class GateHttpTests(unittest.TestCase):
             worker.join(timeout=3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0][0],200)
-
-    def test_observe_only_disallows_handoff_http(self):
-        self.coord.observe_only=True
-        status,data=self.req('/internal/handoff/begin',
-                             {'target':'granite','owner':'p'})
-        self.assertEqual(status,409)
-        self.assertEqual(data['error']['code'],'OBSERVE_ONLY_NO_HANDOFF')
-        self.assertEqual(self.driver.ops,[])
 
     def test_other_model_and_invalid_stream_rejected(self):
         for body in ({'model':'/models/wrong.gguf'},
