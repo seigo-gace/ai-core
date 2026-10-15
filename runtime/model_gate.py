@@ -767,6 +767,14 @@ def make_handler(coordinator, model, api_key):
                                 raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID') from error
                             if not isinstance(decoded,dict):
                                 raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID')
+                            # A syntactically valid JSON error or empty object
+                            # cannot masquerade as successful inference.
+                            if response.status == 200 and (
+                                    not isinstance(decoded.get('choices'),list)
+                                    or not decoded['choices']
+                                    or not all(isinstance(choice,dict)
+                                               for choice in decoded['choices'])):
+                                raise AdmissionError(502,'UPSTREAM_COMPLETION_CONTRACT_INVALID')
                             self.send_response(response.status)
                             self.send_header('Content-Type','application/json')
                             self.send_header('Content-Length',str(len(upstream)))
