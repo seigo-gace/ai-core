@@ -70,3 +70,15 @@ class PrivateTransportPolicyTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
+
+    def test_gate_unmounted_private_bus_rejected_before_start(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from runtime.model_gate import run_servers, AdmissionError
+        spec = {'coder': {'backend_socket':
+                          '/run/ai-core-backend/coder.sock'}}
+        c = SimpleNamespace(specs=spec)
+        with patch('runtime.model_gate.os.path.ismount', return_value=False):
+            with self.assertRaisesRegex(AdmissionError,
+                                        'BACKEND_UNIX_GATE_VOLUME_NOT_MOUNTED'):
+                run_servers(c, 'existing-key-set', '/tmp/unused-state-path')
