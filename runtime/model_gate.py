@@ -6,6 +6,7 @@ router is retired; inference enters only the exclusive model Gate.
 """
 import argparse
 import contextlib
+from collections import deque
 import hashlib
 import fcntl
 import hmac
@@ -396,6 +397,51 @@ class Coordinator:
         self.handoff_journal = None
         self.orphaned = set()
         self.orphan_idle_samples = {}
+        # Bounded, content-free actual inference samples shared across all Gates.
+        self.metric_samples = deque(maxlen=256)
+        self.metric_lock = threading.Lock()
+
+    def record_inference(self, model, elapsed_ms, success, *,
+                         first_token_ms=None, output_tokens=None):
+        """Store numbers only, never client, prompt, answer, or headers."""
+        if model not in self.specs:
+            return
+        sample = {'model': model, 'elapsed_ms': max(0, int(elapsed_ms)),
+                  'success': bool(success), 'first_token_ms': first_token_ms,
+                  'output_tokens': output_tokens}
+        with self.metric_lock:
+            self.metric_samples.append(sample)
+
+    def metrics_snapshot(self):
+        """Nearest-rank p50/p95 from a bounded window of completed requests."""
+        with self.metric_lock:
+            samples = list(self.metric_samples)
+        def percentile(values, fraction):
+            if not values:
+                return None
+            ordered = sorted(values)
+            return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
+        result = {}
+        for model in self.specs:
+            own = [x for x in samples if x['model'] == model]
+            successful = [x for x in own if x['success']]
+            durations = [x['elapsed_ms'] for x in successful]
+            first = [x['first_token_ms'] for x in successful
+                     if x['first_token_ms'] is not None]
+            rates = [round(1000*x['output_tokens']/x['elapsed_ms'], 2)
+                     for x in successful if x['output_tokens'] is not None
+                     and x['elapsed_ms'] > 0]
+            result[model] = {'completed': len(own),
+                             'success': len(successful),
+                             'failed': len(own)-len(successful),
+                             'latency_ms_p50': percentile(durations, .50),
+                             'latency_ms_p95': percentile(durations, .95),
+                             'stream_first_token_ms_p50': percentile(first, .50),
+                             'stream_first_token_ms_p95': percentile(first, .95),
+                             'effective_output_tps_p50': percentile(rates, .50),
+                             'effective_output_tps_p95': percentile(rates, .95)}
+        return {'window_capacity': 256, 'window_completed': len(samples),
+                'model_metrics': result}
 
     def _persist_leases(self):
         if self.lease_journal is None:
@@ -1145,6 +1191,9 @@ def make_handler(coordinator, model, api_key):
                           'recovery_pending': pending}
                 self._send(200, result)
                 return
+            if self.path == '/internal/metrics/status':
+                self._send(200, coordinator.metrics_snapshot())
+                return
             if self.path == '/internal/resources/status':
                 # Authenticated, read-only physical resource accounting. Do
                 # not infer available memory from configured model ceilings.
@@ -1230,6 +1279,11 @@ def make_handler(coordinator, model, api_key):
             if self.path != '/v1/chat/completions':
                 self._send(404,{'error':{'code':'NOT_FOUND'}})
                 return
+            metric_started = time.monotonic()
+            metric_model = model
+            metric_success = False
+            metric_first_token_ms = None
+            metric_output_tokens = None
             try:
                 length = int(self.headers.get('Content-Length','-1'))
                 if length < 1 or length > MAX_REQUEST_BYTES:
@@ -1241,6 +1295,7 @@ def make_handler(coordinator, model, api_key):
                 if obj.get('model') not in (target_id,model+'/'+target_id):
                     raise AdmissionError(422,'WRONG_MODEL_FOR_ENDPOINT')
                 obj['model'] = target_id
+                metric_model = model
                 body = json.dumps(obj,ensure_ascii=False).encode('utf-8')
                 stream_headers_sent = False
                 wait_raw = self.headers.get('X-AI-Core-Wait-Ms', '0')
@@ -1311,6 +1366,21 @@ def make_handler(coordinator, model, api_key):
                                         done = True
                                         terminal_event = event
                                     else:
+                                        if metric_first_token_ms is None:
+                                            for line in data_lines:
+                                                try:
+                                                    payload = json.loads(line[5:].strip())
+                                                    choices = payload.get('choices', [])
+                                                    token = any(isinstance(c, dict) and
+                                                        isinstance(c.get('delta'), dict) and
+                                                        bool(c['delta'].get('content'))
+                                                        for c in choices)
+                                                except (ValueError, AttributeError, TypeError):
+                                                    token = False
+                                                if token:
+                                                    metric_first_token_ms = int(
+                                                        (time.monotonic() - metric_started)*1000)
+                                                    break
                                         self.wfile.write(event)
                                         self.wfile.flush()
                                 if stream_error:
@@ -1325,6 +1395,7 @@ def make_handler(coordinator, model, api_key):
                                     '\n\n').encode('utf-8'))
                             else:
                                 self.wfile.write(terminal_event)
+                                metric_success = response.status == 200
                             self.wfile.flush()
                         else:
                             # An invalid upstream framing header is a backend
@@ -1367,6 +1438,12 @@ def make_handler(coordinator, model, api_key):
                             self.send_header('Content-Length',str(len(upstream)))
                             self.end_headers()
                             self.wfile.write(upstream)
+                            metric_success = response.status == 200
+                            usage = decoded.get('usage', {})
+                            if isinstance(usage, dict):
+                                ct = usage.get('completion_tokens')
+                                if type(ct) is int and ct >= 0:
+                                    metric_output_tokens = ct
                     finally:
                         conn.close()
             except AdmissionError as error:
@@ -1387,6 +1464,11 @@ def make_handler(coordinator, model, api_key):
                     self._send(503,{'error':{'code':'UPSTREAM_UNAVAILABLE'}})
                 else:
                     self.close_connection = True
+            finally:
+                coordinator.record_inference(
+                    metric_model, int((time.monotonic()-metric_started)*1000),
+                    metric_success, first_token_ms=metric_first_token_ms,
+                    output_tokens=metric_output_tokens)
     return Handler
 
 

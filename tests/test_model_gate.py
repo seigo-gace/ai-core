@@ -1431,6 +1431,42 @@ class GateHttpTests(unittest.TestCase):
         status,_=self.req('/internal/resources/status',auth=False)
         self.assertEqual(status,401)
 
+    def test_metrics_status_counts_real_http_and_never_exposes_prompts(self):
+        status, empty = self.req('/internal/metrics/status')
+        self.assertEqual(status, 200)
+        self.assertEqual(empty['window_completed'], 0)
+        status, _ = self.req('/internal/metrics/status', auth=False)
+        self.assertEqual(status, 401)
+        prompt = 'PRIVATE_PROMPT_MUST_NOT_BE_IN_METRICS'
+        status, _ = self.req('/v1/chat/completions', {
+            'model': '/models/coder.gguf', 'messages': [{'role': 'user', 'content': prompt}]})
+        self.assertEqual(status, 200)
+        status, _ = self.req('/v1/chat/completions', {
+            'model': '/models/coder.gguf',
+            'messages': [{'role': 'user', 'content': 'invalid-json'}]})
+        self.assertEqual(status, 502)
+        status, data = self.req('/internal/metrics/status')
+        self.assertEqual(status, 200)
+        result = data['model_metrics']['coder']
+        self.assertEqual((result['completed'], result['success'], result['failed']),
+                         (2, 1, 1))
+        self.assertIsNotNone(result['latency_ms_p50'])
+        self.assertNotIn(prompt, json.dumps(data))
+        self.assertNotIn('messages', json.dumps(data))
+
+    def test_metrics_bounded_percentiles_ignore_noncompleted_tokens(self):
+        for value in range(1, 300):
+            self.coord.record_inference('coder', value*100, value % 5 != 0,
+                                        output_tokens=10 if value % 5 else None)
+        self.coord.record_inference('not-a-model', 1, True)
+        status, metrics = self.req('/internal/metrics/status')
+        self.assertEqual(status, 200)
+        self.assertEqual(metrics['window_completed'], 256)
+        sample = metrics['model_metrics']['coder']
+        self.assertEqual(sample['completed'], 256)
+        self.assertEqual(sample['success']+sample['failed'], 256)
+        self.assertGreater(sample['latency_ms_p95'], sample['latency_ms_p50'])
+
     def test_authenticated_running_source_fingerprint(self):
         import hashlib
         from runtime import model_gate
