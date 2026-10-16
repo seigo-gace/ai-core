@@ -14,10 +14,10 @@ import urllib.request
 from pathlib import Path
 
 MODELS = {
-    "granite": ("ai-granite", 18081),
-    "qwen3": ("ai-qwen3", 18082),
-    "coder": ("ai-coder", 18084),
-    "ministral": ("ai-ministral", 18083),
+    "granite": ("ai-granite", "/run/ai-core-backend/granite.sock"),
+    "qwen3": ("ai-qwen3", "/run/ai-core-backend/qwen3.sock"),
+    "coder": ("ai-coder", "/run/ai-core-backend/coder.sock"),
+    "ministral": ("ai-ministral", "/run/ai-core-backend/ministral.sock"),
 }
 OWNER = "ai-core-host-restart-acceptance"
 GATE_PROBE = """
@@ -73,22 +73,39 @@ def physically_running():
             == "true"}
 
 
+BACKEND_PROBE = """
+import json, sys
+from runtime.model_gate import backend_http_connection
+spec = {"backend_socket": sys.argv[1]}
+conn = backend_http_connection(spec, timeout=3)
+try:
+    conn.request("GET", sys.argv[2])
+    response = conn.getresponse()
+    if response.status != 200:
+        raise RuntimeError("BACKEND_STATUS_NOT_READY")
+    print(response.read(65536).decode("utf-8"))
+finally:
+    conn.close()
+"""
+
+
+def backend_get(name, path):
+    # Probe the private socket through the existing Gate mount; never
+    # contact retired plaintext backend TCP listeners on the Host.
+    return run(["docker", "exec", "ai-core-model-gate", "python3", "-c",
+                BACKEND_PROBE, MODELS[name][1], path], timeout=9)
+
+
 def backend_health(name):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:" +
-                                    str(MODELS[name][1]) + "/health",
-                                    timeout=3) as response:
-            return response.status == 200
+        return json.loads(backend_get(name, "/health")).get("status") == "ok"
     except Exception:
         return False
 
 
 def backend_idle(name):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:" +
-                                    str(MODELS[name][1]) + "/slots",
-                                    timeout=3) as response:
-            slots = json.load(response)
+        slots = json.loads(backend_get(name, "/slots"))
         return isinstance(slots, list) and bool(slots) and all(
             isinstance(slot, dict) and slot.get("is_processing") is False
             for slot in slots)
