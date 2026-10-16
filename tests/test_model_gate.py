@@ -211,6 +211,38 @@ class CoordinatorTests(unittest.TestCase):
             c.waiters.remove(a1)
             self.assertIs(c._next_waiter(),a2)
 
+    def test_waiting_ready_request_works_during_other_cold_load(self):
+        loading=threading.Event()
+        allow_start=threading.Event()
+        failures=[]
+        class SlowStart(FakeDriver):
+            def start(self, spec):
+                loading.set()
+                if not allow_start.wait(3):
+                    raise TimeoutError('cold start timed out')
+                super().start(spec)
+        c=Coordinator(specs(),SlowStart(('coder',)))
+        def cold():
+            try:
+                with c.lease('granite',wait_seconds=2,client='client-a'):
+                    pass
+            except Exception as e:
+                failures.append(repr(e))
+        th=threading.Thread(target=cold,daemon=True)
+        th.start()
+        try:
+            self.assertTrue(loading.wait(2))
+            with c.lease('coder',wait_seconds=1,client='client-b'):
+                self.assertEqual(c.active['coder'],1)
+                self.assertFalse(allow_start.is_set())
+        finally:
+            allow_start.set()
+            th.join(timeout=4)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(failures,[])
+        self.assertEqual(c.waiters,[])
+        self.assertEqual(c.waiter_inflight,set())
+
     def test_client_label_validation_and_metadata_reclamation(self):
         c=Coordinator(specs(),FakeDriver(('coder',)))
         for label in ('bad client', '', 'x'*65, 'a/b', 'é'):
