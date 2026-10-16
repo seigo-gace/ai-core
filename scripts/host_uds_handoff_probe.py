@@ -81,7 +81,10 @@ def main():
         result["old"]=old
         result["target"]=target
         result["step"]="HANDOFF_BEGIN"
-        begin=call(old,"/internal/handoff/begin",{"target":target,"owner":OWNER,"ttl":100},timeout=70)
+        # The Coordinator allows up to 180s for cold readiness (plus Docker
+        # start). Do not abandon the owner-bound ticket after 70s merely
+        # because a shared CPU is loaded by an independent product.
+        begin=call(old,"/internal/handoff/begin",{"target":target,"owner":OWNER,"ttl":240},timeout=210)
         ticket=begin["ticket"]
         during=state(old)
         mid=resource(old)
