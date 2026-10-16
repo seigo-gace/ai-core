@@ -43,6 +43,21 @@ def main():
         first=resource("coder")
         before=state("coder")
         original=before["resident"]
+        if len(original)==1:
+            # Prepare a second resident exclusively via the public Gate lease;
+            # never start a backend directly or bypass shared Coordinator.
+            second=next(x for x in PORT if x not in original)
+            catalogue=call(second,"/v1/models",timeout=8)
+            request={"model":catalogue["data"][0]["id"],
+                     "messages":[{"role":"user","content":"Reply OK."}],
+                     "max_tokens":1,"temperature":0,"stream":False}
+            warmed=call(second,"/v1/chat/completions",request,timeout=55)
+            if not warmed.get("choices"):
+                raise RuntimeError("SECOND_RESIDENT_WARMUP_INFERENCE_FAILED")
+            first=resource("coder")
+            before=state("coder")
+            original=before["resident"]
+            result["second_resident_prepared_via_gate"]=second
         if not(len(original)==2 and not any(before["active"].values())
                and before["handoff"] is None and not before["recovery_pending"]
                and first["queued"]==0):
