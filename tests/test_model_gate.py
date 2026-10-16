@@ -193,6 +193,31 @@ class CoordinatorTests(unittest.TestCase):
                 self.assertEqual(json.loads((Path(tmp)/'active-leases.json').read_text())['active']['coder'],1)
             self.assertEqual(json.loads((Path(tmp)/'active-leases.json').read_text())['active']['coder'],0)
 
+    def test_three_inherited_models_recover_to_two_without_forced_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d=FakeDriver(('coder','qwen3','granite'))
+            c=Coordinator(specs(),d)
+            c.configure_recovery(tmp)
+            c.preflight()
+            self.assertEqual(c.orphaned,{'coder','qwen3','granite'})
+            self.assertEqual(d.ops,[])
+            c._backend_slots_idle=lambda model: True
+            c.reap()
+            self.assertEqual(len(d.loaded),3)
+            c.reap()
+            self.assertLessEqual(len(d.loaded),2)
+            self.assertEqual(c.orphaned,set())
+            self.assertEqual(len([op for op,_ in d.ops if op=='stop']),1)
+
+    def test_four_inherited_residents_still_rejected_with_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d=FakeDriver(('coder','qwen3','granite','ministral'))
+            c=Coordinator(specs(),d)
+            c.configure_recovery(tmp)
+            with self.assertRaisesRegex(AdmissionError,'EXISTING_RESIDENCY_EXCEEDS_POLICY'):
+                c.preflight()
+            self.assertEqual(d.ops,[])
+
     def test_corrupt_lease_journal_blocks_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp)/'active-leases.json').write_text('{not valid')
