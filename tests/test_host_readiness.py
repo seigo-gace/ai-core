@@ -47,6 +47,10 @@ class TestHostReadiness(unittest.TestCase):
         self.assertEqual(out['admission'],'SOURCE_AND_HOST_ONLY')
         self.assertEqual(out['consumer_exclusivity'],'UNKNOWN')
         self.assertFalse(out['production_cutover_approved'])
+        for backend in out['models']:
+            self.assertEqual(backend['backend_transport'], 'unix')
+            self.assertNotIn('api_port', backend)
+            self.assertTrue(backend['backend_socket'].endswith('.sock'))
     def test_cgroup_or_owner_mismatch_is_visible(self):
         out=self.run_probe(ReadOnlyDriver(('coder','qwen3'),('ministral',)))
         self.assertEqual(out['admission'],'BLOCKED')
@@ -67,6 +71,8 @@ class TestHostReadiness(unittest.TestCase):
         self.assertEqual(result['backend_count'],1)
         self.assertEqual(result['running_backends'],1)
         self.assertEqual(result['admission'],'SOURCE_AND_HOST_ONLY')
+        self.assertEqual(result['models'][0]['backend_transport'],'tcp')
+        self.assertEqual(result['models'][0]['api_port'],18090)
         self.assertEqual([item['model'] for item in result['models']],
                          ['research_model'])
         self.assertEqual(driver.ops,[('inspect','research_model')])
