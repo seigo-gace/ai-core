@@ -262,6 +262,10 @@ class ExistingContainerDriver:
         cmd = (container.get('Config') or {}).get('Cmd') or []
         if '-m' not in cmd or cmd.index('-m')+1 >= len(cmd) or cmd[cmd.index('-m')+1] != spec['model_id']:
             raise AdmissionError(409, 'BACKEND_MODEL_ID_MISMATCH')
+        if spec.get('backend_socket'):
+            if ('--host' not in cmd or cmd.index('--host')+1 >= len(cmd) or
+                    cmd[cmd.index('--host')+1] != spec['backend_socket']):
+                raise AdmissionError(409, 'BACKEND_UNIX_LISTENER_MISMATCH')
         return container
 
     def running(self, spec):
