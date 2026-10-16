@@ -18,6 +18,8 @@ import os
 import re
 import secrets
 import socket
+import errno
+import stat
 from pathlib import Path
 import signal
 import subprocess
@@ -271,8 +273,54 @@ class ExistingContainerDriver:
     def running(self, spec):
         return self._inspect(spec).get('State',{}).get('Running') is True
 
+    def _clear_stale_private_socket(self, spec):
+        """Remove only an orphan Unix listener left by a stopped backend.
+
+        Docker stop does not necessarily unlink llama-server's bound pathname.
+        A subsequent start then exits before readiness while leaving its old
+        socket visible. Never unlink a live, non-socket or ambiguous endpoint.
+        """
+        path = spec.get('backend_socket')
+        if not path:
+            return
+        expected = str(Path(BACKEND_UNIX_DIRECTORY) / (spec['service'] + '.sock'))
+        if path != expected:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_PATH_INVALID')
+        try:
+            previous = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_STAT_FAILED') from error
+        if not stat.S_ISSOCK(previous.st_mode):
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_TYPE_UNSAFE')
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(1)
+            code = client.connect_ex(path)
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_PROBE_FAILED') from error
+        finally:
+            client.close()
+        if code != errno.ECONNREFUSED:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_NOT_STALE')
+        # A second physical-container readback is required before removing
+        # the exact abandoned inode. Never infer ownership from lease=0.
+        if self.running(spec):
+            raise AdmissionError(409, 'BACKEND_UNIX_CONTAINER_RESTARTED')
+        try:
+            current = os.lstat(path)
+            if (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino):
+                raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_CHANGED')
+            os.unlink(path)
+        except FileNotFoundError as error:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_CHANGED') from error
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_REMOVE_FAILED') from error
+
     def start(self, spec):
         if not self.running(spec):
+            self._clear_stale_private_socket(spec)
             self._run('start', 'ai-'+spec['service'])
 
     def _backend_slots_idle(self, spec):
