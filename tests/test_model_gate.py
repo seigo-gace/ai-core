@@ -1184,7 +1184,9 @@ class GateHttpTests(unittest.TestCase):
                               'memory.max':'34567','memory.swap.current':'0',
                               'cpu.max':'600000 100000',
                               'cpu.stat':'usage_usec 321\nnr_throttled 7\n',
-                              'memory.events':'oom 0\noom_kill 0\n'}.items():
+                              'memory.events':'oom 0\noom_kill 0\n',
+                              'cpu.pressure':'some avg10=0.12 avg60=0.20 avg300=0.10 total=900',
+                              'memory.pressure':'some avg10=0.00 avg60=0.00 avg300=0.00 total=14'}.items():
                 (root/key).write_text(value)
             with patch('runtime.model_gate.parent_cgroup_folder',return_value=root):
                 status,data=self.req('/internal/resources/status')
@@ -1193,6 +1195,8 @@ class GateHttpTests(unittest.TestCase):
             self.assertEqual(data['cpu_max'],'600000 100000')
             self.assertEqual(data['cpu_stat']['nr_throttled'],7)
             self.assertEqual(data['memory_events']['oom_kill'],0)
+            self.assertIn('avg10=0.12',data['pressure']['cpu'])
+            self.assertIn('total=14',data['pressure']['memory'])
             self.assertEqual(data['queued'],0)
             self.assertEqual(data['active']['coder'],0)
             (root/'memory.current').unlink()
