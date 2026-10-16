@@ -1,0 +1,33 @@
+# New AI Core gate only. Existing four backends are NOT recreated by this file.
+# Supply the already provisioned API key in the deploying environment.
+services:
+  gate:
+    build:
+      context: .
+      dockerfile: Dockerfile.gate
+    image: ai-core-model-gate:local
+    container_name: ai-core-model-gate
+    network_mode: host
+    environment:
+      AI_CORE_API_KEY: ${AI_CORE_API_KEY:?existing_AI_CORE_API_KEY_required}
+      AI_CORE_PARENT_CONTROL_GROUP: /ai-core.slice
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - gate_state:/run/ai-core
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; [urllib.request.urlopen('http://127.0.0.1:%d/health'%p,timeout=2).close() for p in (18181,18182,18183,18184)]"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+volumes:
+  gate_state:
