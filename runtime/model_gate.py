@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Local, per-model OpenAI-compatible gates for existing AI Core Compose services.
 
-No Docker commands run at import or validation time. The old llama-swap
-router stays retired. An optional 18080 OpenAI-compatible listener shares
-the exclusive Gate's same Coordinator; it does not own backend lifecycle.
+No Docker commands run at import or validation time. The legacy 18080
+router is retired; inference enters only the exclusive model Gate.
 """
 import argparse
 import contextlib
@@ -1192,13 +1191,8 @@ def make_handler(coordinator, model, api_key):
                 self._send(200, data)
                 return
             if self.path == '/v1/models':
-                if model == '__compat_18080__':
-                    entries = [{'id': spec['model_id'], 'object': 'model'}
-                               for spec in coordinator.specs.values()]
-                else:
-                    entries = [{'id': coordinator.specs[model]['model_id'],
-                                'object': 'model'}]
-                self._send(200, {'object': 'list', 'data': entries})
+                mid = coordinator.specs[model]['model_id']
+                self._send(200,{'object':'list','data':[{'id':mid,'object':'model'}]})
                 return
             self._send(404,{'error':{'code':'NOT_FOUND'}})
         def do_POST(self):
@@ -1207,9 +1201,6 @@ def make_handler(coordinator, model, api_key):
                 return
             if self.path in ('/internal/handoff/begin', '/internal/handoff/complete',
                              '/internal/handoff/abort'):
-                if model == '__compat_18080__':
-                    self._send(404, {'error': {'code': 'NOT_FOUND'}})
-                    return
                 try:
                     length = int(self.headers.get('Content-Length', '-1'))
                     if not 1 <= length <= 4096:
@@ -1246,19 +1237,9 @@ def make_handler(coordinator, model, api_key):
                 obj = json.loads(self.rfile.read(length).decode('utf-8'))
                 if not isinstance(obj,dict) or not isinstance(obj.get('stream',False),bool):
                     raise AdmissionError(422,'INVALID_STREAM_FLAG')
-                selected = model
-                requested = obj.get('model')
-                if model == '__compat_18080__':
-                    matches = [name for name, spec in coordinator.specs.items()
-                               if requested in (name, spec['model_id'],
-                                                name+'/'+spec['model_id'])]
-                    if len(matches) != 1:
-                        raise AdmissionError(422, 'WRONG_MODEL_FOR_ENDPOINT')
-                    selected = matches[0]
-                target_id = coordinator.specs[selected]['model_id']
-                if model != '__compat_18080__' and requested not in (
-                        target_id, model+'/'+target_id):
-                    raise AdmissionError(422, 'WRONG_MODEL_FOR_ENDPOINT')
+                target_id = coordinator.specs[model]['model_id']
+                if obj.get('model') not in (target_id,model+'/'+target_id):
+                    raise AdmissionError(422,'WRONG_MODEL_FOR_ENDPOINT')
                 obj['model'] = target_id
                 body = json.dumps(obj,ensure_ascii=False).encode('utf-8')
                 stream_headers_sent = False
@@ -1269,7 +1250,7 @@ def make_handler(coordinator, model, api_key):
                 if wait_ms > 30000:
                     raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
                 client = self.headers.get('X-AI-Core-Client', 'default')
-                with coordinator.lease(selected, wait_seconds=wait_ms / 1000, client=client) as spec:
+                with coordinator.lease(model, wait_seconds=wait_ms / 1000, client=client) as spec:
                     conn = backend_http_connection(spec, timeout=600, upstream=True)
                     try:
                         conn.request('POST','/v1/chat/completions',body=body,
@@ -1409,7 +1390,7 @@ def make_handler(coordinator, model, api_key):
     return Handler
 
 
-def run_servers(coordinator, token, state_dir, compat_18080=False):
+def run_servers(coordinator, token, state_dir):
     if not token:
         raise ValueError('EXISTING_API_KEY_REQUIRED')
     if any(spec.get('backend_socket') for spec in coordinator.specs.values()):
@@ -1432,13 +1413,6 @@ def run_servers(coordinator, token, state_dir, compat_18080=False):
                                              make_handler(coordinator,model,token))
                 server.daemon_threads = True
                 servers.append(server)
-            if compat_18080:
-                if 18080 in {spec['gate_port'] for spec in coordinator.specs.values()}:
-                    raise AdmissionError(422, 'COMPAT_PORT_CONFLICT')
-                compat = ThreadingHTTPServer(('127.0.0.1', 18080),
-                          make_handler(coordinator, '__compat_18080__', token))
-                compat.daemon_threads = True
-                servers.append(compat)
             for server in servers:
                 threading.Thread(target=server.serve_forever,daemon=True).start()
             stop = threading.Event()
@@ -1474,7 +1448,6 @@ def main(argv=None):
     parser.add_argument('--preflight',action='store_true')
     parser.add_argument('--serve',action='store_true')
     parser.add_argument('--exclusive-traffic',action='store_true')
-    parser.add_argument('--compat-18080',action='store_true')
     parser.add_argument('--state-dir',default='/home/admin1/projects/ai-core/.ai-core')
     args = parser.parse_args(argv)
     if args.preflight == args.serve:
@@ -1498,7 +1471,7 @@ def main(argv=None):
                               max_active=policy['max_active'],
                               idle_seconds=policy['idle_seconds'])
     print('MODEL_GATE_MODE=EXCLUSIVE_RESIDENCY')
-    run_servers(coordinator,key,args.state_dir,compat_18080=args.compat_18080)
+    run_servers(coordinator,key,args.state_dir)
     return 0
 
 

@@ -6,4 +6,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
 WORKDIR /app
 COPY compose.runtime.yml /app/compose.runtime.yml
 COPY runtime/ /app/runtime/
-CMD ["python3", "/app/runtime/model_gate.py", "--serve", "--exclusive-traffic", "--state-dir", "/run/ai-core", "--compat-18080"]
+CMD ["python3", "/app/runtime/model_gate.py", "--serve", "--exclusive-traffic", "--state-dir", "/run/ai-core"]

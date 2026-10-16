@@ -119,14 +119,3 @@ Each model alias is resolved to its **actual GGUF model ID from existing Compose
 **Remaining generic improvements:** bounded multi-product queue/fairness, restart reconciliation, timeout/cancel/stream termination safety, model-specific profile and runtime OSS feature comparison. These are future Source changes in the same implementation PR, not permission to invent new APIs/ports/workflows.
 
 **Idle recovery correction (current PR #3):** a backend already READY before Gate/Coordinator startup now enters the same idle-timer policy as a backend loaded by that Coordinator. Non-observe-only preflight records the first inherited-resident timestamp; active leases refresh it on release. `--observe-only` never schedules model stopping. Regression cases in `tests/test_generic_model_registry.py` exercise both paths. This is source implementation evidence only until exact-SHA tests run.
-
-## 2026-10-17 — 独立製品受入・旧18080 OpenAI互換の同一Coordinator統合
-
-- **汎用目的は維持:** 4モデル別Gateと単一Coordinatorが物理的な0～2常駐、一時3→2、CPU6コア/RAM36GiBを守る。製品Sourceは変更しない。旧バックエンドTCPを再公開しない。
-- **実機で確認済み:** 4 GateそれぞれのUnixソケット実推論HTTP200、物理的な2→3→2引継ぎ、3モデル中のGate再起動→復旧→中断→2→0、アイドル回収、旧ソケット残存処理。[Core Current](https://github.com/seigo-gace/ai-core/issues/1) に実測値とHost証拠を保持。
-- **独立製品:** 登録済みAstera v8の変更していない `OpenAICompatAdapter` からGranite Gate (18181) への実モデル推論を完了。34.559秒、usage 76 tokens、実応答あり。製品Source・永続Secret・環境設定は変更していない。[実機受入](https://github.com/seigo-gace/ai-core/issues/1#issuecomment-6225180527)。これはAstera全業務パイプラインの完走を意味しない。
-- **旧18080の実体確認:** 互換Routerコンテナ・TCP18080 LISTENは存在しなかった。[Host調査](https://github.com/seigo-gace/ai-core/issues/1#issuecomment-6225240592)。旧Routerを再起動すると直接Backend TCPが遮断されているため、既存の単一Coordinator排他を迂回または破壊する恐れがある。
-- **互換実装:** 新Router/新Coordinatorを設けず、Gate本体に `--compat-18080` オプトインを追加。Loopback限定、既存Bearerを共有し、GET `/v1/models` は登録済み4モデル一覧、POST `/v1/chat/completions` はModel ID/aliasで既存CoordinatorのLeaseへルートする。不正Modelは422、未認証は401、互換入口で管理用POSTハンドオフは禁止。通常Gate18181～18184の機能を維持する。旧llama-swap固有の管理API全体の互換性は証明していない。
-- **検証:** 新互換の認証・モデル切替・Lease/上限のSource重点テストPASS [Core Current](https://github.com/seigo-gace/ai-core/issues/1#issuecomment-6225273337)、Handler変更後の全SourceテストHost exit0 [Host結果](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6225295213)。既存のオフラインイメージから再ビルドPASS [Host結果](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6225332260)。旧イメージ保持・使用中Lease拒否・18080競合拒否・本番HTTP401/200・4 Gateヘルスを備える既存可逆切替PASS [Host結果](https://github.com/G-ACE-inc/server-core/issues/10#issuecomment-6225342822)。
-- **実行未確認:** 18080経由の実モデル推論と旧llama-swap固有API互換、障害時の実機ロールバック操作、同条件の性能p50/p95・TTFT/tps、DebugAI6役割とAstera全業務処理のE2E。このうち18080実推論の次要求は安全チェックで拒否され未実行であり、成功として計上せず別経路で制限を回避しない。
-- **状態区分:** Source PR #3はDraft。Source/テスト/オフラインImage/Host反映/実推論ごとに別証拠を要求し、テスト合格だけを全体完成と扱わない。
