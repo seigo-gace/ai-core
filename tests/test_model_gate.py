@@ -980,6 +980,27 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(d.ops,[])
         self.assertIsNone(c.handoff)
 
+    def test_handoff_target_without_inference_still_idle_reclaims(self):
+        ticks = [100.0]
+        driver = FakeDriver(('coder', 'qwen3'))
+        c = Coordinator(specs(), driver, idle_seconds=10,
+                        clock=lambda: ticks[0], handoff_budget_check=lambda: {
+                            'selected_memory_ceiling': 27,
+                            'selected_cpu_ceiling': 6})
+        c.preflight()
+        transfer = c.handoff_begin('coder', 'ministral', 'consumer-a')
+        self.assertEqual(driver.loaded, {'coder', 'qwen3', 'ministral'})
+        self.assertEqual(c.used['ministral'], ticks[0])
+        c.handoff_finish('consumer-a', completed=True,
+                         ticket=transfer['ticket'])
+        self.assertEqual(driver.loaded, {'qwen3', 'ministral'})
+        ticks[0] += 9
+        c.reap()
+        self.assertEqual(driver.loaded, {'qwen3', 'ministral'})
+        ticks[0] += 2
+        c.reap()
+        self.assertEqual(driver.loaded, set())
+
     def test_handoff_uses_temporary_third_and_reclaims_old(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d,handoff_budget_check=lambda: {'selected_memory_ceiling':27,'selected_cpu_ceiling':6})
