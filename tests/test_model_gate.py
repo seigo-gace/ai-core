@@ -394,6 +394,25 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(c.active['coder'],0)
         self.assertEqual(c.semaphore._value,2)
 
+    def test_three_competing_clients_rotate_without_starving_third(self):
+        coordinator = Coordinator(specs(), FakeDriver(('coder',)))
+        a1, a2, b1, c1 = [object() for _ in range(4)]
+        coordinator.waiters = [a1, a2, b1, c1]
+        coordinator.waiter_clients = {a1: 'client-a', a2: 'client-a',
+                                      b1: 'client-b', c1: 'client-c'}
+        self.assertIs(coordinator._next_waiter(), a1)
+        coordinator.last_served_client = 'client-a'
+        self.assertIs(coordinator._next_waiter(), b1)
+        coordinator.last_served_client = 'client-b'
+        self.assertIs(coordinator._next_waiter(), c1)
+        coordinator.last_served_client = 'client-c'
+        self.assertIs(coordinator._next_waiter(), a1)
+        # FIFO within the client remains intact after its first request ends.
+        coordinator.waiters.remove(a1)
+        coordinator.waiter_clients.pop(a1)
+        coordinator.last_served_client = 'client-c'
+        self.assertIs(coordinator._next_waiter(), a2)
+
     def test_finite_wait_released_by_prior_lease(self):
         import time
         c=Coordinator(specs(),FakeDriver(('coder',)))
