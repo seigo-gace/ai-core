@@ -334,6 +334,37 @@ class CoordinatorTests(unittest.TestCase):
             c.waiters.remove(a1)
             self.assertIs(c._next_waiter(),a2)
 
+    def test_fail_fast_ready_request_bypasses_dispatched_cold_waiter(self):
+        loading=threading.Event()
+        resume=threading.Event()
+        errors=[]
+        class SlowStart(FakeDriver):
+            def start(self, spec):
+                loading.set()
+                if not resume.wait(3):
+                    raise TimeoutError('cold start stalled')
+                super().start(spec)
+        c=Coordinator(specs(),SlowStart(('coder',)))
+        def cold():
+            try:
+                with c.lease('granite',wait_seconds=2,client='cold-client'):
+                    pass
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+        worker=threading.Thread(target=cold,daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(loading.wait(2))
+            with c.lease('coder',client='ready-client'):
+                self.assertEqual(c.active['coder'],1)
+        finally:
+            resume.set()
+            worker.join(timeout=4)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors,[])
+        self.assertEqual(c.waiters,[])
+        self.assertEqual(c.waiter_inflight,set())
+
     def test_waiting_ready_request_works_during_other_cold_load(self):
         loading=threading.Event()
         allow_start=threading.Event()
