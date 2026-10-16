@@ -515,6 +515,42 @@ class CoordinatorTests(unittest.TestCase):
         c.handoff_finish('project-a',ticket=state['ticket'])
         self.assertEqual(d.loaded,{'granite','qwen3'})
 
+    def test_clean_unmapped_cache_allows_bounded_third_without_changing_limits(self):
+        # A stopped model's clean file cache need not be counted as pinned RAM.
+        # Preserve half of that cache as an extra conservative safety margin.
+        budget={'parent_memory_max':36*1024**3,
+                'parent_memory_high':34*1024**3,
+                'parent_cpu_cores':6,
+                'selected_memory_ceiling':18*1024**3,
+                'selected_cpu_ceiling':6}
+        driver=FakeDriver(('granite','qwen3'))
+        c=Coordinator(specs(),driver)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)
+            (folder/'memory.current').write_text('30307172352')
+            (folder/'memory.stat').write_text(
+                'file 20343791616\\nfile_mapped 10338078720\\n'
+                'file_dirty 0\\nfile_writeback 0\\nshmem 0\\n')
+            with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
+                with patch('runtime.model_gate.parent_cgroup_folder',return_value=folder):
+                    result=c._verify_handoff_budget()
+                    self.assertGreater(result['estimated_clean_cache_allowance'],4*1024**3)
+                    self.assertEqual(result['parent_memory_current'],30307172352)
+                    # The same total file usage is NOT headroom when most of
+                    # its pages are mapped by active models.
+                    (folder/'memory.stat').write_text(
+                        'file 20343791616\\nfile_mapped 20000000000\\n'
+                        'file_dirty 0\\nfile_writeback 0\\nshmem 0\\n')
+                    with self.assertRaisesRegex(AdmissionError,
+                                                'HANDOFF_INSUFFICIENT_LIVE_HEADROOM'):
+                        c._verify_handoff_budget()
+                    (folder/'memory.stat').unlink()
+                    with self.assertRaisesRegex(AdmissionError,
+                                                'HANDOFF_MEMORY_STAT_UNAVAILABLE'):
+                        c._verify_handoff_budget()
+        self.assertEqual(driver.ops,[])
+        self.assertEqual(driver.loaded,{'granite','qwen3'})
+
     def test_live_parent_budget_denies_third_at_memory_high(self):
         d=FakeDriver(('coder','qwen3'))
         c=Coordinator(specs(),d)
@@ -528,6 +564,9 @@ class CoordinatorTests(unittest.TestCase):
         def memory_file(path,*args,**kwargs):
             if str(path).endswith('/memory.current'):
                 return str(27*1024**3)
+            if str(path).endswith('/memory.stat'):
+                return ('file 0\\nfile_mapped 0\\nfile_dirty 0\\n'
+                        'file_writeback 0\\nshmem 0\\n')
             return real_read(path,*args,**kwargs)
         with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
             with patch('runtime.model_gate.subprocess.run',return_value=process):
