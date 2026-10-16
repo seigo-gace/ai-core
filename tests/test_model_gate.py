@@ -102,6 +102,21 @@ class SourceTests(unittest.TestCase):
         for value in ('0m','max','5g; rm','-1g'):
             with self.assertRaises(ValueError):
                 parse_bytes(value)
+    def test_docker_gate_parent_group_override_needs_no_systemd(self):
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'ai-core.slice'
+            folder.mkdir()
+            (folder/'memory.max').write_text('36000000000')
+            (folder/'memory.high').write_text('34000000000')
+            (folder/'cpu.max').write_text('600000 100000')
+            with patch.dict('os.environ',{'AI_CORE_PARENT_CONTROL_GROUP':'/ai-core.slice'}):
+                with patch('runtime.model_gate.subprocess.run',
+                           side_effect=AssertionError('systemd must not run')):
+                    budget=verify_parent_budget(items,policy,cgroup_root=Path(tmp))
+            self.assertEqual(budget['parent_cpu_cores'],6)
+
     def test_existing_parent_budget_preserved(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
