@@ -244,7 +244,9 @@ class Coordinator:
         self.used = {name:None for name in specs}
         self.semaphore = threading.BoundedSemaphore(max_active)
         self.wait_condition = threading.Condition(self.lock)
-        self.waiters = []  # bounded FIFO for requests that explicitly opt into waiting
+        self.waiters = []  # bounded waiting queue shared by all model APIs
+        self.waiter_clients = {}  # opaque caller labels; not a security boundary
+        self.last_served_client = None
         self.handoff = None  # bounded, single temporary third-model slot
         self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
 
@@ -376,11 +378,24 @@ class Coordinator:
             self.semaphore.release()
             self.wait_condition.notify_all()
 
-    def acquire_wait(self, model, wait_seconds=0):
-        # Explicit opt-in, bounded FIFO; no active slot is reserved while
+    def _next_waiter(self):
+        # Preserve arrival order within a client while preventing a single
+        # busy client from always winning the next shared inference slot.
+        # Client labels are advisory; authentication remains the API key.
+        if not self.waiters:
+            return None
+        for ticket in self.waiters:
+            if self.waiter_clients.get(ticket, 'default') != self.last_served_client:
+                return ticket
+        return self.waiters[0]
+
+    def acquire_wait(self, model, wait_seconds=0, client='default'):
+        # Explicit opt-in, bounded FIFO within each client; no active slot is reserved while
         # requests wait, and slow Docker transitions run outside the queue lock.
         if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 30:
             raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+        if not isinstance(client, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,63}', client):
+            raise AdmissionError(422, 'INVALID_CLIENT_LABEL')
         if not wait_seconds:
             # Fail-fast traffic cannot jump ahead of clients that elected to
             # wait. Keep admission FIFO across both request classes.
@@ -396,13 +411,14 @@ class Coordinator:
             if len(self.waiters) >= 64:
                 raise AdmissionError(429, 'ADMISSION_QUEUE_FULL')
             self.waiters.append(ticket)
+            self.waiter_clients[ticket] = client
         try:
             while True:
                 with self.wait_condition:
                     remaining = deadline - self.clock()
                     if remaining <= 0:
                         raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
-                    if self.waiters[0] is not ticket:
+                    if self._next_waiter() is not ticket:
                         self.wait_condition.wait(timeout=min(remaining, 0.25))
                         continue
                 # The Coordinator's own lock must remain independently
@@ -415,6 +431,9 @@ class Coordinator:
                     if self.clock() >= deadline:
                         self.release(model)
                         raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
+                    with self.wait_condition:
+                        self.last_served_client = client
+                        self.wait_condition.notify_all()
                     return acquired
                 except AdmissionError as error:
                     if error.code == 'ADMISSION_DEADLINE_EXPIRED':
@@ -428,11 +447,12 @@ class Coordinator:
         finally:
             with self.wait_condition:
                 self.waiters.remove(ticket)
+                self.waiter_clients.pop(ticket, None)
                 self.wait_condition.notify_all()
 
     @contextlib.contextmanager
-    def lease(self, model, wait_seconds=0):
-        self.acquire_wait(model, wait_seconds)
+    def lease(self, model, wait_seconds=0, client='default'):
+        self.acquire_wait(model, wait_seconds, client=client)
         try:
             yield self.specs[model]
         finally:
@@ -768,7 +788,8 @@ def make_handler(coordinator, model, api_key):
                 wait_ms = int(wait_raw)
                 if wait_ms > 30000:
                     raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
-                with coordinator.lease(model, wait_seconds=wait_ms / 1000) as spec:
+                client = self.headers.get('X-AI-Core-Client', 'default')
+                with coordinator.lease(model, wait_seconds=wait_ms / 1000, client=client) as spec:
                     conn = UpstreamConnection('127.0.0.1',spec['backend_port'],timeout=600)
                     try:
                         conn.request('POST','/v1/chat/completions',body=body,
