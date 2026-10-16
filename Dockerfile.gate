@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir PyYAML==6.0.2
+WORKDIR /app
+COPY compose.runtime.yml /app/compose.runtime.yml
+COPY runtime/ /app/runtime/
+CMD ["python3", "/app/runtime/model_gate.py", "--serve", "--exclusive-traffic", "--state-dir", "/run/ai-core"]
