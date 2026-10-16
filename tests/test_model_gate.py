@@ -117,6 +117,29 @@ class SourceTests(unittest.TestCase):
                     budget=verify_parent_budget(items,policy,cgroup_root=Path(tmp))
             self.assertEqual(budget['parent_cpu_cores'],6)
 
+    def test_docker_handoff_uses_parent_group_without_systemd(self):
+        policy = load_policy(ROOT/'runtime/model-policy.yaml')
+        items = model_specs_from_compose(ROOT/'compose.runtime.yml', policy)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)/'ai-core.slice'
+            folder.mkdir()
+            (folder/'memory.max').write_text(str(36*1024**3))
+            (folder/'memory.high').write_text(str(34*1024**3))
+            (folder/'memory.current').write_text(str(14*1024**3))
+            (folder/'cpu.max').write_text('600000 100000')
+            coordinator = Coordinator(items, FakeDriver())
+            with patch.dict('os.environ',
+                            {'AI_CORE_PARENT_CONTROL_GROUP':'/ai-core.slice'}):
+                with patch('runtime.model_gate.parent_cgroup_folder',
+                           side_effect=lambda **kwargs: folder) as resolver:
+                    with patch('runtime.model_gate.subprocess.run',
+                               side_effect=AssertionError('systemd must not run')):
+                        budget = coordinator._verify_handoff_budget()
+            self.assertEqual(resolver.call_count, 2)
+            self.assertEqual(budget['parent_memory_current'], 14*1024**3)
+            self.assertEqual(budget['selected_memory_ceiling'],
+                             3*9216*(1024**2))
+
     def test_existing_parent_budget_preserved(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
