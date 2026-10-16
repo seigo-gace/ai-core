@@ -48,7 +48,8 @@ class SourceTests(unittest.TestCase):
                          set())
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
         self.assertEqual(set(items),set(specs()))
-        self.assertEqual(items['ministral']['backend_port'],18083)
+        self.assertEqual(items['ministral']['backend_socket'],
+                         '/run/ai-core-backend/ministral.sock')
         self.assertEqual(items['coder']['model_id'],
                          '/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf')
         self.assertEqual(items['qwen3']['memory_limit_bytes'],9216*(1024**2))
