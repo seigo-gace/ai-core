@@ -1222,6 +1222,23 @@ class GateHttpTests(unittest.TestCase):
         with request.urlopen(req,timeout=3) as resp:
             stream=resp.read()
         self.assertIn(b'UPSTREAM_STREAM_AFTER_DONE',stream)
+        self.assertIn(b'event: error\ndata: ',stream)
+        self.assertNotIn(b'data: [DONE]',stream)
+        self.assertEqual(self.coord.active['coder'],0)
+
+    def test_stream_sse_exceeding_limit_never_returns_done(self):
+        payload={'model':'/models/coder.gguf','stream':True,
+                 'messages':[{'role':'user','content':'ping'}]}
+        req=request.Request(self.base+'/v1/chat/completions',
+            method='POST',data=json.dumps(payload).encode(),
+            headers={'Authorization':'Bearer EXISTING_TEST_KEY_12345',
+                     'Content-Type':'application/json'})
+        with patch('runtime.model_gate.MAX_RESPONSE_BYTES', 32):
+            with request.urlopen(req,timeout=3) as resp:
+                stream=resp.read()
+        self.assertIn(b'event: error\ndata: ',stream)
+        self.assertIn(b'UPSTREAM_STREAM_TOO_LARGE',stream)
+        self.assertNotIn(b'data: [DONE]',stream)
         self.assertEqual(self.coord.active['coder'],0)
 
     def test_stream_sse_under_shared_lease(self):
