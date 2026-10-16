@@ -65,7 +65,7 @@ def main():
         except (OSError, ValueError, KeyError):
             changes["resident_readback"] = "UNAVAILABLE"
         if before and after:
-            changes = {
+            changes.update({
                 "memory_before_bytes": int(before["memory"]["memory.current"]),
                 "memory_after_bytes": int(after["memory"]["memory.current"]),
                 "memory_high_bytes": int(after["memory"]["memory.high"]),
@@ -74,7 +74,7 @@ def main():
                 "oom_kill_delta": int(after["memory_events"].get("oom_kill", 0)) -
                                   int(before["memory_events"].get("oom_kill", 0)),
                 "queue_after": after["queued"],
-                "active_after": sum(after["active"].values())}
+                "active_after": sum(after["active"].values())})
         emit(model=model, result="PASS" if status == 200 and choice_ok else "FAIL",
              http_status=status, choice_valid=choice_ok, elapsed_s=elapsed,
              usage=answer.get("usage", {}), **changes)
