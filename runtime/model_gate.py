@@ -246,6 +246,7 @@ class Coordinator:
         self.wait_condition = threading.Condition(self.lock)
         self.waiters = []  # bounded waiting queue shared by all model APIs
         self.waiter_clients = {}  # opaque caller labels; not a security boundary
+        self.waiter_inflight = set()  # cold loads must not block unrelated READY requests
         self.last_served_client = None
         self.handoff = None  # bounded, single temporary third-model slot
         self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
@@ -384,10 +385,12 @@ class Coordinator:
         # Client labels are advisory; authentication remains the API key.
         if not self.waiters:
             return None
-        for ticket in self.waiters:
+        available = [ticket for ticket in self.waiters
+                     if ticket not in self.waiter_inflight]
+        for ticket in available:
             if self.waiter_clients.get(ticket, 'default') != self.last_served_client:
                 return ticket
-        return self.waiters[0]
+        return available[0] if available else None
 
     def acquire_wait(self, model, wait_seconds=0, client='default'):
         # Explicit opt-in, bounded FIFO within each client; no active slot is reserved while
@@ -421,6 +424,10 @@ class Coordinator:
                     if self._next_waiter() is not ticket:
                         self.wait_condition.wait(timeout=min(remaining, 0.25))
                         continue
+                    # Mark this candidate dispatched before any potentially
+                    # slow Docker load. Other queued READY requests may use
+                    # a separate idle slot while this one is in progress.
+                    self.waiter_inflight.add(ticket)
                 # The Coordinator's own lock must remain independently
                 # releasable throughout cold start, eviction and readiness.
                 try:
@@ -433,6 +440,7 @@ class Coordinator:
                         raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
                     with self.wait_condition:
                         self.last_served_client = client
+                        self.waiter_inflight.discard(ticket)
                         self.wait_condition.notify_all()
                     return acquired
                 except AdmissionError as error:
@@ -441,11 +449,14 @@ class Coordinator:
                     if error.status != 429:
                         raise
                 with self.wait_condition:
+                    self.waiter_inflight.discard(ticket)
+                    self.wait_condition.notify_all()
                     remaining = deadline - self.clock()
                     if remaining > 0:
                         self.wait_condition.wait(timeout=min(remaining, 0.25))
         finally:
             with self.wait_condition:
+                self.waiter_inflight.discard(ticket)
                 self.waiters.remove(ticket)
                 self.waiter_clients.pop(ticket, None)
                 self.wait_condition.notify_all()
