@@ -852,6 +852,7 @@ def make_handler(coordinator, model, api_key):
                 with coordinator.lock:
                     handoff = coordinator.handoff
                     active = dict(coordinator.active)
+                    pending = sorted(coordinator.orphaned)
                     summary = None if handoff is None else {
                         'from': handoff['from'], 'to': handoff['to'],
                         'expires': handoff['expires']}
@@ -866,7 +867,8 @@ def make_handler(coordinator, model, api_key):
                     self._send(503, {'error': {'code': 'STATUS_BACKEND_UNAVAILABLE'}})
                     return
                 result = {'resident': resident,
-                          'active': active, 'handoff': summary}
+                          'active': active, 'handoff': summary,
+                          'recovery_pending': pending}
                 self._send(200, result)
                 return
             if self.path == '/internal/resources/status':
@@ -901,12 +903,14 @@ def make_handler(coordinator, model, api_key):
                         queued = len(coordinator.waiters)
                         inflight = len(coordinator.waiter_inflight)
                         transitioning = sorted(coordinator.transitioning)
+                        recovery_pending = sorted(coordinator.orphaned)
                     data = {'memory': memory, 'cpu_max': cpu_max,
                             'cpu_stat': cpu_stat, 'memory_events': memory_events,
                             'pressure': pressure,
                             'active': active, 'queued': queued,
                             'admission_inflight': inflight,
-                            'transitioning': transitioning}
+                            'transitioning': transitioning,
+                            'recovery_pending': recovery_pending}
                 except (OSError, ValueError, TypeError):
                     self._send(503, {'error': {'code': 'RESOURCE_READBACK_UNAVAILABLE'}})
                     return
