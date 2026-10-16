@@ -1,0 +1,1646 @@
+#!/usr/bin/env python3
+"""Local, per-model OpenAI-compatible gates for existing AI Core Compose services.
+
+No Docker commands run at import or validation time. The legacy 18080
+router is retired; inference enters only the exclusive model Gate.
+"""
+import argparse
+import contextlib
+from collections import deque
+import hashlib
+import fcntl
+import hmac
+import http.client
+from http.client import HTTPException as UpstreamHTTPException
+from http.client import HTTPConnection as UpstreamConnection
+import json
+import math
+import os
+import re
+import secrets
+import socket
+import errno
+import stat
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import yaml
+
+DEFAULT_POLICY = Path(__file__).with_name('model-policy.yaml')
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+BACKEND_UNIX_DIRECTORY = '/run/ai-core-backend'
+
+
+class UnixBackendConnection(http.client.HTTPConnection):
+    """Retain llama-server HTTP semantics over a local Unix socket."""
+    def __init__(self, path, *, timeout=3):
+        super().__init__('localhost', timeout=timeout)
+        self.unix_path = path
+
+    def connect(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            connection.settimeout(self.timeout)
+            connection.connect(self.unix_path)
+        except BaseException:
+            connection.close()
+            raise
+        self.sock = connection
+
+
+def backend_http_connection(spec, *, timeout=3, upstream=False):
+    """Use one backend transport for health, slots, and inference."""
+    if spec.get('backend_socket'):
+        return UnixBackendConnection(spec['backend_socket'], timeout=timeout)
+    conn_type = UpstreamConnection if upstream else http.client.HTTPConnection
+    return conn_type('127.0.0.1', spec['backend_port'], timeout=timeout)
+
+
+class AdmissionError(Exception):
+    def __init__(self, status, code):
+        self.status, self.code = status, code
+        super().__init__(code)
+
+
+def load_policy(path):
+    policy = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
+    if not isinstance(policy, dict) or policy.get('schema') != 'ai-core/model-policy/v1':
+        raise ValueError('INVALID_POLICY_SCHEMA')
+    models = policy.get('models')
+    if not isinstance(models, dict) or not models:
+        raise ValueError('NO_POLICY_MODELS')
+    for model, item in models.items():
+        if not isinstance(model, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,40}', model):
+            raise ValueError('INVALID_SERVICE_NAME')
+        if not isinstance(item, dict) or not isinstance(item.get('warm'), bool):
+            raise ValueError('INVALID_MODEL_POLICY:' + model)
+        port = item.get('gate_port')
+        if type(port) is not int or not (1024 <= port <= 65535):
+            raise ValueError('INVALID_GATE_PORT:' + model)
+    ports = [item['gate_port'] for item in models.values()]
+    if len(set(ports)) != len(ports):
+        raise ValueError('DUPLICATE_GATE_PORT')
+    max_loaded, max_active = policy.get('max_resident'), policy.get('max_active')
+    if not (type(max_loaded) is int and type(max_active) is int
+            and 1 <= max_active <= max_loaded <= len(models)):
+        raise ValueError('INVALID_ADMISSION_LIMITS')
+    idle = policy.get('idle_seconds')
+    if type(idle) is not int or not (10 <= idle <= 3600):
+        raise ValueError('INVALID_IDLE_SECONDS')
+    return policy
+
+
+def parse_bytes(value):
+    match = re.fullmatch(r'([1-9][0-9]*)([kmg])', str(value).lower())
+    if not match:
+        raise ValueError('INVALID_MEMORY_LIMIT')
+    return int(match.group(1)) * {'k':1024, 'm':1024**2, 'g':1024**3}[match.group(2)]
+
+
+def model_specs_from_compose(path, policy):
+    """Derive model IDs, limits and backend ports from existing Compose source."""
+    cfg = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
+    services = cfg.get('services') or {}
+    specs = {}
+    for model, item in policy['models'].items():
+        svc = services.get(model)
+        if not isinstance(svc, dict):
+            raise ValueError('MISSING_COMPOSE_SERVICE:' + model)
+        cmd = svc.get('command') or []
+        if not isinstance(cmd, list) or '-m' not in cmd:
+            raise ValueError('MISSING_MODEL_ID:' + model)
+        idx = cmd.index('-m')
+        if idx + 1 >= len(cmd) or not str(cmd[idx + 1]).startswith('/models/'):
+            raise ValueError('INVALID_MODEL_ID:' + model)
+        ports = svc.get('ports') or []
+        listen = None
+        if '--host' in cmd and cmd.index('--host') + 1 < len(cmd):
+            listen = cmd[cmd.index('--host') + 1]
+        expected_socket = BACKEND_UNIX_DIRECTORY + '/' + model + '.sock'
+        unix = listen == expected_socket
+        if isinstance(listen, str) and listen.endswith('.sock') and not unix:
+            raise ValueError('INVALID_BACKEND_UNIX_PATH:' + model)
+        if unix:
+            if ports:
+                raise ValueError('BACKEND_UNIX_TCP_PUBLISHED:' + model)
+            mounts = svc.get('volumes') or []
+            if 'ai-core-backend-bus:' + BACKEND_UNIX_DIRECTORY not in mounts:
+                raise ValueError('BACKEND_UNIX_VOLUME_MISSING:' + model)
+        else:
+            if len(ports) != 1:
+                raise ValueError('INVALID_BACKEND_PORT:' + model)
+            parts = str(ports[0]).split(':')
+            if len(parts) != 3 or parts[0] != '127.0.0.1' or not parts[1].isdigit():
+                raise ValueError('BACKEND_NOT_LOOPBACK:' + model)
+        memory = str(svc.get('mem_limit') or '')
+        limit_bytes = parse_bytes(memory)
+        try:
+            cpus = float(svc.get('cpus') or 0)
+        except (TypeError, ValueError):
+            raise ValueError('INVALID_CPU_LIMIT:' + model)
+        if not (0 < cpus <= 64):
+            raise ValueError('INVALID_CPU_LIMIT:' + model)
+        if '--cache-ram' not in cmd:
+            raise ValueError('PROMPT_CACHE_CONTRACT_MISSING:' + model)
+        specs[model] = {'model_id':cmd[idx+1], 'gate_port':item['gate_port'],
+                        'service':model, 'memory_limit_bytes':limit_bytes,
+                        'cpu_limit':cpus, 'warm':item['warm']}
+        if unix:
+            specs[model]['backend_socket'] = expected_socket
+        else:
+            specs[model]['backend_port'] = int(parts[1])
+    if len({bool(v.get('backend_socket')) for v in specs.values()}) > 1:
+        raise ValueError('MIXED_BACKEND_TRANSPORT')
+    tcp_ports = [v['backend_port'] for v in specs.values()
+                 if 'backend_port' in v]
+    if len(set(tcp_ports)) != len(tcp_ports):
+        raise ValueError('DUPLICATE_BACKEND_PORT')
+    return specs
+
+
+def parent_cgroup_folder(*, cgroup_root=Path('/sys/fs/cgroup'),
+                         control_group=None):
+    """Resolve the same read-only Host parent in normal and handoff admission."""
+    if control_group is None:
+        control_group = os.environ.get('AI_CORE_PARENT_CONTROL_GROUP') or None
+    if control_group is None:
+        r = subprocess.run(['systemctl', 'show', 'ai-core.slice',
+                            '-p', 'ControlGroup', '--value'],
+                           capture_output=True, text=True, timeout=8, check=False)
+        if r.returncode or not r.stdout.strip():
+            raise AdmissionError(503, 'PARENT_SLICE_MISSING')
+        control_group = r.stdout.strip()
+    if (not isinstance(control_group, str) or
+            not control_group.startswith('/') or
+            '..' in Path(control_group).parts):
+        raise AdmissionError(503, 'INVALID_CONTROL_GROUP')
+    return cgroup_root / control_group.lstrip('/')
+
+
+def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
+                         control_group=None):
+    """Read current parent cgroup ceilings; never overwrite approved limits."""
+    folder = parent_cgroup_folder(cgroup_root=cgroup_root,
+                                  control_group=control_group)
+    try:
+        mem_max = int((folder/'memory.max').read_text().strip())
+        mem_high = int((folder/'memory.high').read_text().strip())
+        quota, period = (folder/'cpu.max').read_text().strip().split()
+        cpu_cores = int(quota)/int(period)
+    except (OSError, ValueError, ZeroDivisionError) as error:
+        raise AdmissionError(503, 'PARENT_BUDGET_UNAVAILABLE') from error
+    if not (mem_max > 0 and 0 < mem_high <= mem_max and cpu_cores > 0):
+        raise AdmissionError(503, 'PARENT_BUDGET_INVALID')
+    count = policy['max_resident']
+    maximum_memory = sum(sorted((x['memory_limit_bytes'] for x in specs.values()),
+                                reverse=True)[:count])
+    maximum_cpu = sum(sorted((x['cpu_limit'] for x in specs.values()),
+                             reverse=True)[:count])
+    if maximum_memory > mem_max or maximum_cpu > cpu_cores + 0.01:
+        raise AdmissionError(409, 'CONFIGURED_RESIDENTS_EXCEED_PARENT_BUDGET')
+    return {'parent_memory_max':mem_max, 'parent_memory_high':mem_high,
+            'parent_cpu_cores':cpu_cores, 'selected_memory_ceiling':maximum_memory,
+            'selected_cpu_ceiling':maximum_cpu}
+
+
+class ExistingContainerDriver:
+    """Operate only already provisioned, Compose-owned, admitted containers.
+
+    A Compose 'up' could recreate a backend WITHOUT the separately installed
+    cgroup_parent override; Docker start/stop preserves existing HostConfig.
+    """
+    def __init__(self, compose_file, timeout=45):
+        self.compose_file = str(Path(compose_file).resolve())
+        self.timeout = timeout
+
+    def _run(self, *args):
+        result = subprocess.run(['docker', *args], capture_output=True, text=True,
+                                timeout=self.timeout, check=False)
+        if result.returncode:
+            raise AdmissionError(503, 'EXISTING_CONTAINER_COMMAND_FAILED')
+        return result.stdout.strip()
+
+    def _inspect(self, spec):
+        try:
+            records = json.loads(self._run('inspect', 'ai-'+spec['service']))
+        except (ValueError, TypeError) as error:
+            raise AdmissionError(503, 'INVALID_DOCKER_INSPECT') from error
+        if not isinstance(records, list) or len(records) != 1:
+            raise AdmissionError(503, 'EXISTING_CONTAINER_MISSING')
+        container = records[0]
+        if container.get('Name') != '/ai-'+spec['service']:
+            raise AdmissionError(409, 'CONTAINER_IDENTITY_MISMATCH')
+        hc = container.get('HostConfig') or {}
+        labels = (container.get('Config') or {}).get('Labels') or {}
+        if labels.get('com.docker.compose.project') != 'ai-core' or labels.get('com.docker.compose.service') != spec['service']:
+            raise AdmissionError(409, 'COMPOSE_OWNER_MISMATCH')
+        if (hc.get('RestartPolicy') or {}).get('Name') != 'no':
+            raise AdmissionError(409, 'BACKEND_RESTART_POLICY_NOT_MANAGED')
+        if hc.get('CgroupParent') != 'ai-core.slice':
+            raise AdmissionError(409, 'BACKEND_CGROUP_NOT_PROTECTED')
+        if int(hc.get('Memory') or 0) != spec['memory_limit_bytes']:
+            raise AdmissionError(409, 'BACKEND_MEMORY_LIMIT_MISMATCH')
+        if int(hc.get('NanoCpus') or 0) != round(spec['cpu_limit']*1_000_000_000):
+            raise AdmissionError(409, 'BACKEND_CPU_LIMIT_MISMATCH')
+        ports = (hc.get('PortBindings') or {}).get('8080/tcp') or []
+        if spec.get('backend_socket'):
+            if any(value for value in (hc.get('PortBindings') or {}).values()):
+                raise AdmissionError(409, 'BACKEND_UNIX_TCP_EXPOSED')
+            mounts = container.get('Mounts') or []
+            if not any(isinstance(mount, dict) and
+                       mount.get('Type') == 'volume' and
+                       mount.get('Name') == 'ai-core-backend-bus' and
+                       mount.get('Destination') == BACKEND_UNIX_DIRECTORY
+                       for mount in mounts):
+                raise AdmissionError(409, 'BACKEND_UNIX_VOLUME_NOT_SHARED')
+        elif (len(ports) != 1 or ports[0].get('HostIp') != '127.0.0.1'
+                or str(ports[0].get('HostPort')) != str(spec['backend_port'])):
+            raise AdmissionError(409, 'BACKEND_LOOPBACK_PORT_MISMATCH')
+        cmd = (container.get('Config') or {}).get('Cmd') or []
+        if '-m' not in cmd or cmd.index('-m')+1 >= len(cmd) or cmd[cmd.index('-m')+1] != spec['model_id']:
+            raise AdmissionError(409, 'BACKEND_MODEL_ID_MISMATCH')
+        if spec.get('backend_socket'):
+            if ('--host' not in cmd or cmd.index('--host')+1 >= len(cmd) or
+                    cmd[cmd.index('--host')+1] != spec['backend_socket']):
+                raise AdmissionError(409, 'BACKEND_UNIX_LISTENER_MISMATCH')
+        return container
+
+    def running(self, spec):
+        return self._inspect(spec).get('State',{}).get('Running') is True
+
+    def _clear_stale_private_socket(self, spec):
+        """Remove only an orphan Unix listener left by a stopped backend.
+
+        Docker stop does not necessarily unlink llama-server's bound pathname.
+        A subsequent start then exits before readiness while leaving its old
+        socket visible. Never unlink a live, non-socket or ambiguous endpoint.
+        """
+        path = spec.get('backend_socket')
+        if not path:
+            return
+        expected = str(Path(BACKEND_UNIX_DIRECTORY) / (spec['service'] + '.sock'))
+        if path != expected:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_PATH_INVALID')
+        try:
+            previous = os.lstat(path)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_STAT_FAILED') from error
+        if not stat.S_ISSOCK(previous.st_mode):
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_TYPE_UNSAFE')
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(1)
+            code = client.connect_ex(path)
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_PROBE_FAILED') from error
+        finally:
+            client.close()
+        if code != errno.ECONNREFUSED:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_NOT_STALE')
+        # A second physical-container readback is required before removing
+        # the exact abandoned inode. Never infer ownership from lease=0.
+        if self.running(spec):
+            raise AdmissionError(409, 'BACKEND_UNIX_CONTAINER_RESTARTED')
+        try:
+            current = os.lstat(path)
+            if (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino):
+                raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_CHANGED')
+            os.unlink(path)
+        except FileNotFoundError as error:
+            raise AdmissionError(409, 'BACKEND_UNIX_SOCKET_CHANGED') from error
+        except OSError as error:
+            raise AdmissionError(503, 'BACKEND_UNIX_SOCKET_REMOVE_FAILED') from error
+
+    def start(self, spec):
+        if not self.running(spec):
+            self._clear_stale_private_socket(spec)
+            self._run('start', 'ai-'+spec['service'])
+
+    def _backend_slots_idle(self, spec):
+        """Independently refuse eviction while llama.cpp is processing.
+
+        An unregistered direct-backend caller does not own a Coordinator
+        lease. Zero known leases alone can never prove that Docker stop is
+        safe. /slots is a safety observation, not a substitute for network
+        isolation or exclusive traffic ownership.
+        """
+        connection = backend_http_connection(spec, timeout=3)
+        try:
+            connection.request('GET', '/slots')
+            response = connection.getresponse()
+            if response.status != 200:
+                return False
+            slots = json.loads(response.read(65536).decode('utf-8'))
+            return (isinstance(slots, list) and bool(slots)
+                    and all(isinstance(slot, dict)
+                            and type(slot.get('is_processing')) is bool
+                            and not slot['is_processing']
+                            for slot in slots))
+        except (OSError, ValueError, TypeError, TimeoutError,
+                UpstreamHTTPException):
+            return False
+        finally:
+            connection.close()
+
+    def stop(self, spec):
+        if self.running(spec):
+            # Fail closed if direct bypass traffic is still processing or
+            # backend slots cannot be verified. A subsequent reaper pass may
+            # retry after legitimate work has finished.
+            if not self._backend_slots_idle(spec):
+                raise AdmissionError(409, 'BACKEND_SLOTS_BUSY_OR_UNVERIFIED')
+            self._run('stop', '--time', '30', 'ai-'+spec['service'])
+
+    def healthy(self, spec):
+        try:
+            conn = backend_http_connection(spec, timeout=3)
+            conn.request('GET','/health')
+            response = conn.getresponse()
+            response.read(4096)
+            conn.close()
+            return response.status == 200
+        except OSError:
+            return False
+
+
+class Coordinator:
+    """All model-specific API listeners share one lease/capacity owner."""
+    def __init__(self, specs, driver, max_loaded=2, max_active=2, idle_seconds=120,
+                 start_timeout=180, clock=time.monotonic,
+                 handoff_budget_check=None):
+        if not (1 <= max_loaded <= len(specs) and 1 <= max_active <= max_loaded):
+            raise ValueError('INVALID_ADMISSION_LIMITS')
+        self.specs, self.driver = specs, driver
+        self.max_loaded, self.max_active = max_loaded, max_active
+        self.transitioning = set()  # cold-loading model; prohibit another cold transition
+        self.idle_seconds, self.start_timeout, self.clock = idle_seconds, start_timeout, clock
+        self.lock = threading.RLock()
+        self.active = {name:0 for name in specs}
+        self.used = {name:None for name in specs}
+        self.semaphore = threading.BoundedSemaphore(max_active)
+        self.wait_condition = threading.Condition(self.lock)
+        self.waiters = []  # bounded waiting queue shared by all model APIs
+        self.waiter_clients = {}  # opaque caller labels; not a security boundary
+        self.waiter_inflight = set()  # cold loads must not block unrelated READY requests
+        self.last_served_client = None
+        self.handoff = None  # bounded, single temporary third-model slot
+        self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
+        self.lease_journal = None
+        self.handoff_journal = None
+        self.orphaned = set()
+        self.orphan_idle_samples = {}
+        # Bounded, content-free actual inference samples shared across all Gates.
+        self.metric_samples = deque(maxlen=256)
+        self.metric_lock = threading.Lock()
+        self.metric_journal = None
+        self.metric_journal_state = 'IN_MEMORY'
+
+    def record_inference(self, model, elapsed_ms, success, *,
+                         first_token_ms=None, output_tokens=None):
+        """Store numbers only, never client, prompt, answer, or headers."""
+        if model not in self.specs:
+            return
+        sample = {'model': model, 'elapsed_ms': max(0, int(elapsed_ms)),
+                  'success': bool(success), 'first_token_ms': first_token_ms,
+                  'output_tokens': output_tokens}
+        with self.metric_lock:
+            self.metric_samples.append(sample)
+            self._persist_metric_samples()
+
+    def configure_metrics(self, folder):
+        """Keep bounded, content-free samples through Gate image restarts.
+
+        This uses the existing private Gate state volume, never a new service,
+        credential or raw request log. Damaged telemetry never blocks inference.
+        """
+        path = Path(folder) / 'inference-metrics-v1.json'
+        with self.metric_lock:
+            self.metric_samples.clear()
+            self.metric_journal = path
+            self.metric_journal_state = 'READY'
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                return
+            except OSError:
+                self.metric_journal_state = 'READ_FAILED'
+                return
+            try:
+                with os.fdopen(fd, 'rb') as stream:
+                    raw = stream.read(65537)
+                if len(raw) > 65536:
+                    raise ValueError('METRIC_FILE_TOO_LARGE')
+                payload = json.loads(raw.decode('utf-8'))
+                samples = payload['samples']
+                if (type(payload.get('schema')) is not int or
+                        payload['schema'] != 1 or
+                        not isinstance(samples, list) or len(samples) > 256):
+                    raise ValueError('METRIC_SCHEMA_INVALID')
+                for sample in samples:
+                    if not isinstance(sample, dict) or set(sample) != {
+                            'model', 'elapsed_ms', 'success',
+                            'first_token_ms', 'output_tokens'}:
+                        raise ValueError('METRIC_FIELDS_INVALID')
+                    if (sample['model'] not in self.specs or
+                            type(sample['elapsed_ms']) is not int or
+                            not 0 <= sample['elapsed_ms'] <= 86_400_000 or
+                            type(sample['success']) is not bool):
+                        raise ValueError('METRIC_VALUES_INVALID')
+                    for field in ('first_token_ms', 'output_tokens'):
+                        v = sample[field]
+                        if v is not None and (type(v) is not int or
+                                              not 0 <= v <= 86_400_000):
+                            raise ValueError('METRIC_VALUES_INVALID')
+                self.metric_samples.extend(samples)
+            except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+                self.metric_journal_state = 'CORRUPT'
+                self.metric_samples.clear()
+
+    def _persist_metric_samples(self):
+        if self.metric_journal is None:
+            return
+        # Called only under metric_lock. Atomic replace prevents partial
+        # JSON when Gate is terminated, and samples never contain text.
+        temp = self.metric_journal.with_suffix('.tmp')
+        payload = json.dumps({'schema': 1, 'samples': list(self.metric_samples)},
+                             separators=(',', ':'), sort_keys=True).encode('utf-8')
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC |
+                         os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, self.metric_journal)
+            self.metric_journal_state = 'READY'
+        except OSError:
+            # Never fail a successful inference because observability is
+            # temporarily unwritable. Expose the loss of persistence.
+            self.metric_journal_state = 'WRITE_FAILED'
+
+    def metrics_snapshot(self):
+        """Nearest-rank p50/p95 from a bounded window of completed requests."""
+        with self.metric_lock:
+            samples = list(self.metric_samples)
+        def percentile(values, fraction):
+            if not values:
+                return None
+            ordered = sorted(values)
+            return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
+        result = {}
+        for model in self.specs:
+            own = [x for x in samples if x['model'] == model]
+            successful = [x for x in own if x['success']]
+            durations = [x['elapsed_ms'] for x in successful]
+            first = [x['first_token_ms'] for x in successful
+                     if x['first_token_ms'] is not None]
+            rates = [round(1000*x['output_tokens']/x['elapsed_ms'], 2)
+                     for x in successful if x['output_tokens'] is not None
+                     and x['elapsed_ms'] > 0]
+            result[model] = {'completed': len(own),
+                             'success': len(successful),
+                             'failed': len(own)-len(successful),
+                             'latency_ms_p50': percentile(durations, .50),
+                             'latency_ms_p95': percentile(durations, .95),
+                             'stream_first_token_ms_p50': percentile(first, .50),
+                             'stream_first_token_ms_p95': percentile(first, .95),
+                             'effective_output_tps_p50': percentile(rates, .50),
+                             'effective_output_tps_p95': percentile(rates, .95)}
+        return {'window_capacity': 256, 'window_completed': len(samples),
+                'persistence': self.metric_journal_state,
+                'model_metrics': result}
+
+    def _persist_leases(self):
+        if self.lease_journal is None:
+            return
+        counts = {m: self.active[m] + int(m in self.orphaned)
+                  for m in self.specs}
+        data = json.dumps({'schema': 1, 'active': counts}, sort_keys=True)
+        target = self.lease_journal.with_suffix('.tmp')
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(target, self.lease_journal)
+        except OSError as error:
+            raise AdmissionError(503, 'LEASE_JOURNAL_WRITE_FAILED') from error
+
+    def _persist_handoff(self):
+        """Persist an owner-bound transaction before making a Docker change."""
+        if self.handoff_journal is None:
+            return
+        state = self.handoff
+        record = None
+        if state is not None:
+            record = {key: state[key] for key in
+                      ('from', 'to', 'owner', 'ticket', 'started_target')}
+            record['final_action'] = state.get('final_action')
+            record['pending'] = state['expires'] is None
+            record['deadline_wall'] = (
+                time.time() + max(0, state['expires'] - self.clock())
+                if state['expires'] is not None else None)
+        payload = json.dumps({'schema': 1, 'handoff': record}, sort_keys=True)
+        target = self.handoff_journal.with_suffix('.tmp')
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(target, self.handoff_journal)
+            fd = os.open(self.handoff_journal.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as error:
+            raise AdmissionError(503, 'HANDOFF_JOURNAL_WRITE_FAILED') from error
+
+    def _load_handoff(self, folder):
+        path = Path(folder) / 'handoff-state.json'
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding='utf-8'))
+                if not isinstance(payload, dict) or payload.get('schema') != 1:
+                    raise ValueError('INVALID_HANDOFF_SCHEMA')
+                state = payload['handoff']
+                if state is not None:
+                    if (not isinstance(state, dict) or
+                            set(state) != {'from', 'to', 'owner', 'ticket',
+                                           'started_target', 'final_action',
+                                           'pending', 'deadline_wall'} or
+                            state['from'] not in self.specs or
+                            state['to'] not in self.specs or
+                            state['from'] == state['to'] or
+                            not isinstance(state['owner'], str) or
+                            not state['owner'] or len(state['owner']) > 128 or
+                            not isinstance(state['ticket'], str) or
+                            len(state['ticket']) < 32 or
+                            type(state['started_target']) is not bool or
+                            type(state['pending']) is not bool or
+                            state['final_action'] not in (None, 'complete', 'abort') or
+                            (state['deadline_wall'] is not None and
+                             (type(state['deadline_wall']) not in (int, float) or
+                              not math.isfinite(state['deadline_wall']))) or
+                            (not state['pending'] and state['deadline_wall'] is None)):
+                        raise ValueError('INVALID_HANDOFF_RECORD')
+                    pending = state.pop('pending')
+                    wall = state.pop('deadline_wall')
+                    # A restart during a cold handoff load cannot assume that
+                    # readiness succeeded; force an abort after orphan recovery.
+                    state['expires'] = (self.clock() if pending else
+                        self.clock() + max(0, wall - time.time()))
+                    if pending:
+                        state['final_action'] = 'abort'
+                    self.handoff = state
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                raise AdmissionError(503, 'HANDOFF_JOURNAL_CORRUPT') from error
+        self.handoff_journal = path
+
+    def configure_recovery(self, folder):
+        """Journal leases in the existing Gate volume; fail closed on corruption."""
+        with self.lock:
+            path = Path(folder) / 'active-leases.json'
+            if path.is_file():
+                try:
+                    content = json.loads(path.read_text(encoding='utf-8'))
+                    counts = content['active']
+                    if (content.get('schema') != 1 or
+                            set(counts) != set(self.specs) or
+                            any(type(v) is not int or v < 0
+                                for v in counts.values())):
+                        raise ValueError('INVALID_JOURNAL')
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                    raise AdmissionError(503, 'LEASE_JOURNAL_CORRUPT') from error
+                self.orphaned = {m for m, count in counts.items() if count > 0}
+            self._load_handoff(folder)
+            self.lease_journal = path
+            self._persist_leases()
+
+    def _backend_slots_idle(self, model):
+        spec = self.specs[model]
+        try:
+            connection = backend_http_connection(spec, timeout=3)
+            try:
+                connection.request('GET', '/slots')
+                response = connection.getresponse()
+                if response.status != 200:
+                    return False
+                records = json.loads(response.read(65536).decode('utf-8'))
+                return (isinstance(records, list) and len(records) > 0 and
+                        all(isinstance(slot, dict) and
+                            type(slot.get('is_processing')) is bool and
+                            not slot['is_processing'] for slot in records))
+            finally:
+                connection.close()
+        except (OSError, ValueError, TypeError, TimeoutError):
+            return False
+
+    def recover_orphans(self):
+        # Do not infer idle status from /health. Require two independent
+        # /slots observations; lack of a supported slots API fails closed.
+        with self.lock:
+            candidates = list(self.orphaned)
+        for model in candidates:
+            running = self.driver.running(self.specs[model])
+            idle = not running or self._backend_slots_idle(model)
+            with self.lock:
+                if model not in self.orphaned:
+                    continue
+                self.orphan_idle_samples[model] = (
+                    self.orphan_idle_samples.get(model, 0) + 1 if idle else 0)
+                if not running or self.orphan_idle_samples[model] >= 2:
+                    # Never release an orphan reservation in memory before
+                    # its durable journal update succeeds. A failed fsync or
+                    # rename must leave global capacity protected.
+                    old_samples = self.orphan_idle_samples.pop(model, None)
+                    self.orphaned.remove(model)
+                    try:
+                        self._persist_leases()
+                    except BaseException:
+                        self.orphaned.add(model)
+                        if old_samples is not None:
+                            self.orphan_idle_samples[model] = old_samples
+                        raise
+                    self.wait_condition.notify_all()
+
+    def running(self):
+        return {name for name,spec in self.specs.items() if self.driver.running(spec)}
+
+    def preflight(self):
+        """Reject over-capacity inherited residents; never evict them on startup."""
+        with self.lock:
+            loaded = self.running()
+            if len(loaded) > self.max_loaded:
+                if self.lease_journal is None or len(loaded) > 3:
+                    raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
+                self.orphaned.update(loaded)
+                self._persist_leases()
+            # Inherited ready residents must enter the same idle TTL policy
+            # as models first loaded by this coordinator.
+            started = self.clock()
+            for name in loaded:
+                if self.used[name] is None:
+                    self.used[name] = started
+            return loaded
+
+    def _make_room(self, target):
+        loaded = self.running()
+        if self.handoff is not None:
+            raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
+        evicted = []
+        if target in loaded:
+            return evicted
+        while len(loaded) >= self.max_loaded:
+            idle = [m for m in loaded if self.active[m] == 0 and m != target and m not in self.orphaned]
+            if not idle:
+                raise AdmissionError(429, 'ALL_RESIDENT_MODELS_LEASED')
+            victim = min(idle,key=lambda m:(self.specs[m]['warm'],self.used[m] or 0,m))
+            # The cold target is reserved by acquire(). Reserve the victim too:
+            # unrelated ready-model leases must not wait on a slow Docker stop.
+            self.transitioning.add(victim)
+            try:
+                self.lock.release()
+                try:
+                    self.driver.stop(self.specs[victim])
+                    if self.driver.running(self.specs[victim]):
+                        raise AdmissionError(503, 'EVICTION_NOT_CONFIRMED')
+                finally:
+                    self.lock.acquire()
+            finally:
+                self.transitioning.discard(victim)
+            evicted.append(victim)
+            loaded.remove(victim)
+        return evicted
+
+    def _restore_previous(self, target, previous):
+        # Called only while holding self.lock. Roll back even when Docker
+        # stopped a resident before returning its stop acknowledgment.
+        spec = self.specs[target]
+        if self.driver.running(spec):
+            self.driver.stop(spec)
+        for old in previous:
+            if not self.driver.running(self.specs[old]):
+                self.driver.start(self.specs[old])
+            if not self.driver.running(self.specs[old]):
+                raise AdmissionError(503, 'ROLLBACK_RESIDENT_NOT_RUNNING')
+
+    def acquire(self, model):
+        if model not in self.specs:
+            raise AdmissionError(404, 'UNKNOWN_MODEL')
+        spec = self.specs[model]
+        previous = None
+        semaphore_acquired = False
+        with self.lock:
+            if model in self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
+            if self.active[model]:
+                raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
+            # After Gate restart, an orphaned backend may still be executing
+            # a detached inference. Its unknown lease reserves one GLOBAL
+            # inference slot until /slots proves that model idle. The local
+            # semaphore alone only knows leases acquired by this process.
+            if sum(self.active.values()) + len(self.orphaned) >= self.max_active:
+                raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+            if model in self.transitioning:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            if self.driver.running(spec):
+                if not self.semaphore.acquire(blocking=False):
+                    raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+                self.active[model] += 1
+                self.used[model] = self.clock()
+                try:
+                    self._persist_leases()
+                except AdmissionError:
+                    self.active[model] -= 1
+                    self.semaphore.release()
+                    raise
+                return model
+            if self.transitioning or self.handoff is not None:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            # Avoid a pointless cold start when every inference slot is
+            # already leased; no slot is held while the model actually loads.
+            if sum(self.active.values()) >= self.max_active:
+                raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+            # A cold-load reservation is not an active inference lease.
+            # Do not occupy the global inference slots during Docker startup.
+            previous = self.running()
+            self.transitioning.add(model)
+        try:
+            with self.lock:
+                self._make_room(model)
+            self.driver.start(spec)
+            deadline = self.clock() + self.start_timeout
+            while self.clock() < deadline:
+                if self.driver.healthy(spec):
+                    break
+                time.sleep(0.4)
+            else:
+                raise AdmissionError(503, 'MODEL_START_TIMEOUT')
+            with self.lock:
+                if not self.semaphore.acquire(blocking=False):
+                    raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
+                semaphore_acquired = True
+                self.active[model] += 1
+                self.used[model] = self.clock()
+                try:
+                    self._persist_leases()
+                except AdmissionError:
+                    self.active[model] -= 1
+                    raise
+            return model
+        except BaseException:
+            if semaphore_acquired:
+                self.semaphore.release()
+            with self.lock:
+                try:
+                    self._restore_previous(model, previous)
+                except Exception as error:
+                    raise AdmissionError(503, 'MODEL_START_ROLLBACK_FAILED') from error
+            raise
+        finally:
+            with self.lock:
+                self.transitioning.discard(model)
+
+    def release(self, model):
+        # Keep the model lease count and global inference slot in sync.
+        # Releasing outside the lock briefly exposed an idle model while the
+        # global slot was still unavailable to the next request.
+        with self.lock:
+            if self.active[model] <= 0:
+                raise RuntimeError('DOUBLE_RELEASE')
+            self.active[model] -= 1
+            self.used[model] = self.clock()
+            try:
+                self._persist_leases()
+            finally:
+                self.semaphore.release()
+                self.wait_condition.notify_all()
+
+    def _next_waiter(self):
+        # Preserve arrival order within a client while preventing a single
+        # busy client from always winning the next shared inference slot.
+        # Client labels are advisory; authentication remains the API key.
+        if not self.waiters:
+            return None
+        available = [ticket for ticket in self.waiters
+                     if ticket not in self.waiter_inflight]
+        # Rotate over DISTINCT active callers, not merely "different from the
+        # last caller". The latter alternates A/B forever while C waits
+        # behind a long backlog, violating the no-starvation requirement.
+        first_ticket = {}
+        order = []
+        for ticket in available:
+            client = self.waiter_clients.get(ticket, 'default')
+            if client not in first_ticket:
+                first_ticket[client] = ticket
+                order.append(client)
+        if not order:
+            return None
+        turn = (order.index(self.last_served_client) + 1
+                if self.last_served_client in first_ticket else 0)
+        return first_ticket[order[turn % len(order)]]
+
+    def acquire_wait(self, model, wait_seconds=0, client='default'):
+        # Explicit opt-in, bounded FIFO within each client; no active slot is reserved while
+        # requests wait, and slow Docker transitions run outside the queue lock.
+        if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 30:
+            raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+        if not isinstance(client, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,63}', client):
+            raise AdmissionError(422, 'INVALID_CLIENT_LABEL')
+        if not wait_seconds:
+            # Fail-fast traffic cannot jump ahead of clients that elected to
+            # wait. Keep admission FIFO across both request classes.
+            with self.wait_condition:
+                # A dispatched cold loader is no longer queued for an
+                # inference slot. READY fail-fast calls must not be blocked
+                # by it, while undispatched waiting callers retain priority.
+                if self._next_waiter() is not None:
+                    raise AdmissionError(429, 'ADMISSION_QUEUE_BUSY')
+            return self.acquire(model)
+        if model not in self.specs:
+            raise AdmissionError(404, 'UNKNOWN_MODEL')
+        deadline = self.clock() + wait_seconds
+        ticket = object()
+        with self.wait_condition:
+            if len(self.waiters) >= 64:
+                raise AdmissionError(429, 'ADMISSION_QUEUE_FULL')
+            self.waiters.append(ticket)
+            self.waiter_clients[ticket] = client
+        try:
+            while True:
+                with self.wait_condition:
+                    remaining = deadline - self.clock()
+                    if remaining <= 0:
+                        raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
+                    if self._next_waiter() is not ticket:
+                        self.wait_condition.wait(timeout=min(remaining, 0.25))
+                        continue
+                    # Mark this candidate dispatched before any potentially
+                    # slow Docker load. Other queued READY requests may use
+                    # a separate idle slot while this one is in progress.
+                    self.waiter_inflight.add(ticket)
+                # The Coordinator's own lock must remain independently
+                # releasable throughout cold start, eviction and readiness.
+                try:
+                    acquired = self.acquire(model)
+                    # A cold Docker load may complete after the caller's
+                    # deadline. Never return an already-expired inference
+                    # lease, and always release the reserved global slot.
+                    if self.clock() >= deadline:
+                        self.release(model)
+                        raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
+                    with self.wait_condition:
+                        self.last_served_client = client
+                        self.waiter_inflight.discard(ticket)
+                        self.wait_condition.notify_all()
+                    return acquired
+                except AdmissionError as error:
+                    if error.code == 'ADMISSION_DEADLINE_EXPIRED':
+                        raise
+                    if error.status != 429:
+                        raise
+                with self.wait_condition:
+                    self.waiter_inflight.discard(ticket)
+                    self.wait_condition.notify_all()
+                    remaining = deadline - self.clock()
+                    if remaining > 0:
+                        self.wait_condition.wait(timeout=min(remaining, 0.25))
+        finally:
+            with self.wait_condition:
+                self.waiter_inflight.discard(ticket)
+                self.waiters.remove(ticket)
+                self.waiter_clients.pop(ticket, None)
+                self.wait_condition.notify_all()
+
+    @contextlib.contextmanager
+    def lease(self, model, wait_seconds=0, client='default'):
+        self.acquire_wait(model, wait_seconds, client=client)
+        try:
+            yield self.specs[model]
+        finally:
+            self.release(model)
+
+    def _verify_handoff_budget(self):
+        # Parent CPU quota governs active inference, not the number of
+        # idle-but-resident models during a short handoff.
+        budget = verify_parent_budget(
+            self.specs, {'max_resident': self.max_active})
+        projected = sum(sorted(
+            (item['memory_limit_bytes'] for item in self.specs.values()),
+            reverse=True)[:3])
+        if projected > budget['parent_memory_max']:
+            raise AdmissionError(409, 'HANDOFF_MEMORY_CEILING_EXCEEDED')
+        # A theoretical 3-container ceiling is insufficient when other
+        # work/cache already occupies the parent. Read live usage before
+        # starting the third backend; keep 1 GiB below the established High.
+        try:
+            current = int((parent_cgroup_folder() / 'memory.current')
+                          .read_text().strip())
+        except (OSError, ValueError) as error:
+            raise AdmissionError(503, 'HANDOFF_MEMORY_CURRENT_UNAVAILABLE') from error
+        # A newly started backend can use its entire container ceiling
+        # while loading. Keep 1 GiB below High, without treating clean,
+        # *unmapped* cache left by stopped models as pinned RAM.
+        largest = max(item['memory_limit_bytes'] for item in self.specs.values())
+        projected_live = current + largest + 1024**3
+        cache_allowance = 0
+        if projected_live > budget['parent_memory_high']:
+            try:
+                stats = {}
+                required = {'file', 'file_mapped', 'file_dirty',
+                            'file_writeback', 'shmem'}
+                for line in (parent_cgroup_folder() / 'memory.stat').read_text().splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] in required:
+                        stats[fields[0]] = int(fields[1])
+                if (set(stats) != required or any(v < 0 for v in stats.values())):
+                    raise ValueError('INVALID_MEMORY_STAT')
+            except (OSError, ValueError) as error:
+                raise AdmissionError(503, 'HANDOFF_MEMORY_STAT_UNAVAILABLE') from error
+            # Subtract mapped pages, dirty/writeback pages and tmpfs before
+            # discounting even clean page cache. Admit only half the remaining
+            # *unmapped clean file* estimate; Linux memory.high must still
+            # reclaim it. Never lower the actual cgroup limits.
+            clean_unmapped = max(
+                0, stats['file'] - stats['file_mapped']
+                   - stats['file_dirty'] - stats['file_writeback']
+                   - stats['shmem'])
+            cache_allowance = clean_unmapped // 2
+            if projected_live - cache_allowance > budget['parent_memory_high']:
+                raise AdmissionError(429, 'HANDOFF_INSUFFICIENT_LIVE_HEADROOM')
+        return {**budget, 'selected_memory_ceiling': projected,
+                'parent_memory_current': current,
+                'estimated_clean_cache_allowance': cache_allowance}
+
+    def handoff_begin(self, previous, target, owner, ttl=120):
+        """Reserve one temporary third resident; no HTTP/public API implied.
+
+        The existing ready model remains usable. A handoff reservation is
+        explicitly owner-bound and short-lived; a second transition is denied.
+        """
+        if previous not in self.specs or target not in self.specs or previous == target:
+            raise AdmissionError(422, 'INVALID_HANDOFF_MODELS')
+        if not isinstance(owner, str) or not owner or len(owner) > 128:
+            raise AdmissionError(422, 'INVALID_HANDOFF_OWNER')
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 1 <= ttl <= 600:
+            raise AdmissionError(422, 'INVALID_HANDOFF_TTL')
+        with self.lock:
+            if self.handoff or self.transitioning:
+                raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
+            # A third resident may be started only after every old inference
+            # from an interrupted Gate process has been reconciled. An orphan
+            # unrelated to `previous` and `target` is still a live resource.
+            if self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
+            loaded = self.running()
+            if len(loaded) > self.max_loaded:
+                raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
+            needs_start = target not in loaded
+            if len(loaded) + int(needs_start) > 3:
+                raise AdmissionError(409, 'HANDOFF_CAPACITY_EXCEEDED')
+            # Reserve under the mutex; the potentially slow parent cgroup
+            # probe happens after unlocking so ready inference can proceed.
+            self.handoff = {'from': previous, 'to': target, 'owner': owner,
+                            'ticket': secrets.token_urlsafe(32),
+                            'expires': None, 'ready_ttl': ttl,
+                             'started_target': needs_start,
+                             'final_action': None}
+            # Reserve durably before any third-model physical startup.
+            try:
+                self._persist_handoff()
+            except BaseException:
+                self.handoff = None
+                raise
+            if needs_start:
+                self.transitioning.add(target)
+        try:
+            budget = self.handoff_budget_check() if needs_start else None
+            if needs_start:
+                if budget['selected_memory_ceiling'] <= 0 or budget['selected_cpu_ceiling'] <= 0:
+                    raise AdmissionError(409, 'HANDOFF_PARENT_BUDGET_INVALID')
+                self.driver.start(self.specs[target])
+                deadline = self.clock() + self.start_timeout
+                while self.clock() < deadline:
+                    if self.driver.healthy(self.specs[target]):
+                        break
+                    time.sleep(0.4)
+                else:
+                    raise AdmissionError(503, 'HANDOFF_TARGET_NOT_READY')
+            with self.lock:
+                if len(self.running()) > 3:
+                    raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
+                self.handoff['expires'] = self.clock() + self.handoff.pop('ready_ttl')
+                self._persist_handoff()
+                # A handoff-only third model has never acquired an inference
+                # lease. Without this timestamp it stays resident forever:
+                # the idle reaper deliberately ignores None last-use values.
+                if needs_start:
+                    self.used[target] = self.clock()
+                elif self.used[target] is None:
+                    self.used[target] = self.clock()
+                return dict(self.handoff)
+        except BaseException:
+            # A failed start can already have made the target resident.
+            # Never forget its reservation until its shutdown is confirmed:
+            # otherwise a later cold start could create a fourth resident.
+            cleanup_ok = False
+            try:
+                if needs_start and self.driver.running(self.specs[target]):
+                    self.driver.stop(self.specs[target])
+                cleanup_ok = not needs_start or not self.driver.running(self.specs[target])
+            except Exception:
+                pass
+            with self.lock:
+                if cleanup_ok:
+                    old = self.handoff
+                    self.handoff = None
+                    try:
+                        self._persist_handoff()
+                    except BaseException:
+                        self.handoff = old
+                        raise
+                else:
+                    # Retain the abort intent until the third-model stop
+                    # succeeds, even when the Gate process restarts.
+                    self.handoff['expires'] = self.clock()
+                    self.handoff['final_action'] = 'abort'
+                    self._persist_handoff()
+            if not cleanup_ok:
+                raise AdmissionError(503, 'HANDOFF_ROLLBACK_PENDING')
+            raise
+        finally:
+            with self.lock:
+                if needs_start:
+                    self.transitioning.discard(target)
+
+    def handoff_finish(self, owner, *, completed=True, ticket=None):
+        """Finish or cancel; a busy model is never stopped."""
+        with self.lock:
+            state = self.handoff
+            if state is None or state['owner'] != owner:
+                raise AdmissionError(404, 'HANDOFF_NOT_OWNED')
+            if ticket is not None and not hmac.compare_digest(state['ticket'], ticket):
+                raise AdmissionError(403, 'HANDOFF_TICKET_INVALID')
+            if state['expires'] is None:
+                raise AdmissionError(429, 'HANDOFF_NOT_READY')
+            if self.transitioning:
+                raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            action = 'complete' if completed else 'abort'
+            if state.get('final_action') not in (None, action):
+                raise AdmissionError(409, 'HANDOFF_OUTCOME_ALREADY_COMMITTED')
+            victim = state['from'] if completed else (state['to'] if state.get('started_target') else None)
+            if completed and victim not in self.running():
+                # The source model can be nonresident in a general handoff.
+                # Reclaim an idle unrelated resident only if a third exists.
+                loaded = self.running()
+                if len(loaded) > self.max_loaded:
+                    candidates = [m for m in loaded if m != state['to']
+                                  and self.active[m] == 0]
+                    if not candidates:
+                        raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
+                    victim = min(candidates,
+                                 key=lambda m:(self.specs[m]['warm'],
+                                               self.used[m] or 0, m))
+            if victim is None:
+                old = self.handoff
+                self.handoff = None
+                try:
+                    self._persist_handoff()
+                except BaseException:
+                    self.handoff = old
+                    raise
+                return
+            if self.active[victim]:
+                raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
+            if victim in self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
+            # A crash after the stop must not reverse completion into an
+            # expiry-abort which would evict the new target model.
+            old_action = state.get('final_action')
+            state['final_action'] = action
+            try:
+                self._persist_handoff()
+            except BaseException:
+                state['final_action'] = old_action
+                raise
+            self.transitioning.add(victim)
+        try:
+            # Recovery is idempotent: a previous stop may have succeeded even
+            # when its confirmation failed. Never stop an already-absent model.
+            if self.driver.running(self.specs[victim]):
+                self.driver.stop(self.specs[victim])
+            if self.driver.running(self.specs[victim]):
+                raise AdmissionError(503, 'HANDOFF_STOP_NOT_CONFIRMED')
+            with self.lock:
+                old = self.handoff
+                self.handoff = None
+                try:
+                    self._persist_handoff()
+                except BaseException:
+                    self.handoff = old
+                    raise
+        finally:
+            with self.lock:
+                self.transitioning.discard(victim)
+
+    def handoff_expire(self):
+        with self.lock:
+            state = self.handoff
+            if state is None or state['expires'] is None or self.clock() < state['expires']:
+                return False
+            owner = state['owner']
+        # Preserve a previously committed completion across a Gate crash.
+        self.handoff_finish(owner, completed=state.get('final_action') == 'complete')
+        return True
+
+    def reap(self):
+        """Reclaim any idle backend without automatically restoring a fixed warm pair.
+
+        A transition is reserved under the lock, but slow Docker stop/start
+        runs outside it. Acquiring the transitioning model fails closed; an
+        already-ready model may still acquire a lease concurrently.
+        """
+        self.recover_orphans()
+        for _ in range(2 * len(self.specs)):
+            with self.lock:
+                if self.transitioning or self.handoff:
+                    return
+                loaded = self.running()
+                choice = None
+                if len(loaded) > self.max_loaded:
+                    available = [m for m in loaded if not self.active[m] and m not in self.orphaned]
+                    if available:
+                        victim = min(available, key=lambda m:(self.specs[m]['warm'], self.used[m] or 0,m))
+                        choice = ('stop', victim)
+                else:
+                    for model in loaded:
+                        if self.active[model] or model in self.orphaned:
+                            continue
+                        last = self.used[model]
+                        if last is not None and self.clock() - last >= self.idle_seconds:
+                            choice = ('stop', model)
+                            break
+                if choice is None:
+                    return
+                action, model = choice
+                self.transitioning.add(model)
+            try:
+                spec = self.specs[model]
+                if action == 'stop':
+                    self.driver.stop(spec)
+                    if self.driver.running(spec):
+                        raise AdmissionError(503, 'IDLE_STOP_NOT_CONFIRMED')
+                else:
+                    self.driver.start(spec)
+                    if not self.driver.running(spec):
+                        raise AdmissionError(503, 'WARM_RESTORE_NOT_CONFIRMED')
+            finally:
+                with self.lock:
+                    self.transitioning.discard(model)
+        raise AdmissionError(503, 'REAPER_TRANSITION_LIMIT')
+
+
+def make_handler(coordinator, model, api_key):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = 'AICoreModelGate/1'
+        def log_message(self, fmt, *args):
+            return
+        def _auth(self):
+            return hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+api_key)
+        def _send(self, status, payload):
+            raw = json.dumps(payload,ensure_ascii=False).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def do_GET(self):
+            if self.path == '/health':
+                self._send(200,{'status':'ok','gate_model':model})
+                return
+            if not self._auth():
+                self._send(401,{'error':{'code':'UNAUTHORIZED'}})
+                return
+            if self.path == '/internal/source/status':
+                # Source fingerprint is computed from the executing file,
+                # rather than accepted from an environment variable or PR.
+                try:
+                    digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+                except OSError:
+                    self._send(503, {'error': {'code': 'SOURCE_FINGERPRINT_UNAVAILABLE'}})
+                    return
+                self._send(200, {'source_sha256': digest,
+                                 'gate_model': model})
+                return
+            if self.path == '/internal/handoff/status':
+                with coordinator.lock:
+                    handoff = coordinator.handoff
+                    active = dict(coordinator.active)
+                    pending = sorted(coordinator.orphaned)
+                    summary = None if handoff is None else {
+                        'from': handoff['from'], 'to': handoff['to'],
+                        'expires': handoff['expires']}
+                # Docker inspect can be slow. A monitoring GET must not
+                # hold the global lease lock during that readback.
+                try:
+                    resident = sorted(coordinator.running())
+                except AdmissionError as error:
+                    self._send(error.status, {'error': {'code': error.code}})
+                    return
+                except (OSError, subprocess.TimeoutExpired):
+                    self._send(503, {'error': {'code': 'STATUS_BACKEND_UNAVAILABLE'}})
+                    return
+                result = {'resident': resident,
+                          'active': active, 'handoff': summary,
+                          'recovery_pending': pending}
+                self._send(200, result)
+                return
+            if self.path == '/internal/metrics/status':
+                self._send(200, coordinator.metrics_snapshot())
+                return
+            if self.path == '/internal/resources/status':
+                # Authenticated, read-only physical resource accounting. Do
+                # not infer available memory from configured model ceilings.
+                try:
+                    root = parent_cgroup_folder()
+                    memory = {name: (root / name).read_text().strip()
+                              for name in ('memory.current','memory.high',
+                                           'memory.max','memory.swap.current')}
+                    cpu_max = (root / 'cpu.max').read_text().strip()
+                    cpu_stat = {}
+                    for line in (root / 'cpu.stat').read_text().splitlines():
+                        fields = line.split()
+                        if len(fields) == 2:
+                            cpu_stat[fields[0]] = int(fields[1])
+                    memory_events = {}
+                    for line in (root / 'memory.events').read_text().splitlines():
+                        fields = line.split()
+                        if len(fields) == 2:
+                            memory_events[fields[0]] = int(fields[1])
+                    # Pressure Stall Information is part of the parent
+                    # cgroup, not an estimated sum of model container limits.
+                    pressure = {}
+                    for kind in ('cpu', 'memory'):
+                        try:
+                            pressure[kind] = (root / (kind + '.pressure')).read_text().strip()
+                        except FileNotFoundError:
+                            pressure[kind] = None
+                    with coordinator.lock:
+                        active = dict(coordinator.active)
+                        queued = len(coordinator.waiters)
+                        inflight = len(coordinator.waiter_inflight)
+                        transitioning = sorted(coordinator.transitioning)
+                        recovery_pending = sorted(coordinator.orphaned)
+                    data = {'memory': memory, 'cpu_max': cpu_max,
+                            'cpu_stat': cpu_stat, 'memory_events': memory_events,
+                            'pressure': pressure,
+                            'active': active, 'queued': queued,
+                            'admission_inflight': inflight,
+                            'transitioning': transitioning,
+                            'recovery_pending': recovery_pending}
+                except (OSError, ValueError, TypeError):
+                    self._send(503, {'error': {'code': 'RESOURCE_READBACK_UNAVAILABLE'}})
+                    return
+                self._send(200, data)
+                return
+            if self.path == '/v1/models':
+                mid = coordinator.specs[model]['model_id']
+                self._send(200,{'object':'list','data':[{'id':mid,'object':'model'}]})
+                return
+            self._send(404,{'error':{'code':'NOT_FOUND'}})
+        def do_POST(self):
+            if not self._auth():
+                self._send(401,{'error':{'code':'UNAUTHORIZED'}})
+                return
+            if self.path in ('/internal/handoff/begin', '/internal/handoff/complete',
+                             '/internal/handoff/abort'):
+                try:
+                    length = int(self.headers.get('Content-Length', '-1'))
+                    if not 1 <= length <= 4096:
+                        raise AdmissionError(413, 'INVALID_REQUEST_SIZE')
+                    data = json.loads(self.rfile.read(length).decode('utf-8'))
+                    if not isinstance(data, dict):
+                        raise AdmissionError(422, 'INVALID_HANDOFF_REQUEST')
+                    if self.path == '/internal/handoff/begin':
+                        result = coordinator.handoff_begin(
+                            model, data.get('target'), data.get('owner'),
+                            data.get('ttl', 120))
+                        self._send(200, result)
+                    else:
+                        ticket = data.get('ticket')
+                        if not isinstance(ticket, str) or not ticket:
+                            raise AdmissionError(422, 'HANDOFF_TICKET_REQUIRED')
+                        coordinator.handoff_finish(
+                            data.get('owner'),
+                            completed=self.path.endswith('/complete'),
+                            ticket=ticket)
+                        self._send(200, {'handoff': 'finished'})
+                except AdmissionError as error:
+                    self._send(error.status, {'error': {'code': error.code}})
+                except (ValueError, UnicodeDecodeError, TypeError):
+                    self._send(400, {'error': {'code': 'BAD_REQUEST'}})
+                return
+            if self.path != '/v1/chat/completions':
+                self._send(404,{'error':{'code':'NOT_FOUND'}})
+                return
+            metric_started = time.monotonic()
+            metric_model = model
+            metric_success = False
+            metric_first_token_ms = None
+            metric_output_tokens = None
+            try:
+                length = int(self.headers.get('Content-Length','-1'))
+                if length < 1 or length > MAX_REQUEST_BYTES:
+                    raise AdmissionError(413,'INVALID_REQUEST_SIZE')
+                obj = json.loads(self.rfile.read(length).decode('utf-8'))
+                if not isinstance(obj,dict) or not isinstance(obj.get('stream',False),bool):
+                    raise AdmissionError(422,'INVALID_STREAM_FLAG')
+                target_id = coordinator.specs[model]['model_id']
+                if obj.get('model') not in (target_id,model+'/'+target_id):
+                    raise AdmissionError(422,'WRONG_MODEL_FOR_ENDPOINT')
+                obj['model'] = target_id
+                metric_model = model
+                body = json.dumps(obj,ensure_ascii=False).encode('utf-8')
+                stream_headers_sent = False
+                wait_raw = self.headers.get('X-AI-Core-Wait-Ms', '0')
+                if not re.fullmatch(r'[0-9]{1,5}', wait_raw):
+                    raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+                wait_ms = int(wait_raw)
+                if wait_ms > 30000:
+                    raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
+                client = self.headers.get('X-AI-Core-Client', 'default')
+                with coordinator.lease(model, wait_seconds=wait_ms / 1000, client=client) as spec:
+                    conn = backend_http_connection(spec, timeout=600, upstream=True)
+                    try:
+                        conn.request('POST','/v1/chat/completions',body=body,
+                                     headers={'Content-Type':'application/json'})
+                        response = conn.getresponse()
+                        if obj.get('stream',False):
+                            if response.status != 200 or not response.getheader('Content-Type','').lower().startswith('text/event-stream'):
+                                raise AdmissionError(502,'UPSTREAM_STREAM_CONTRACT_INVALID')
+                            # Keep the shared model lease until the upstream SSE
+                            # stream terminates (including client disconnect).
+                            self.send_response(200)
+                            self.send_header('Content-Type','text/event-stream')
+                            self.send_header('Cache-Control','no-cache')
+                            self.send_header('Connection','close')
+                            self.end_headers()
+                            stream_headers_sent = True
+                            self.close_connection = True
+                            # Do not publish [DONE] until upstream reaches EOF.
+                            # An error after a terminal marker must never look
+                            # like a successful OpenAI-compatible completion.
+                            total = 0
+                            done = False
+                            terminal_event = b''
+                            pending_sse_event = b''
+                            stream_error = None
+                            while True:
+                                try:
+                                    chunk = response.read1(8192)
+                                except (OSError, TimeoutError, ValueError,
+                                        UpstreamHTTPException):
+                                    stream_error = 'UPSTREAM_STREAM_INTERRUPTED'
+                                    break
+                                if not chunk:
+                                    break
+                                total += len(chunk)
+                                if total > MAX_RESPONSE_BYTES:
+                                    stream_error = 'UPSTREAM_STREAM_TOO_LARGE'
+                                    break
+                                pending_sse_event += chunk
+                                # Forward only complete events. Support both
+                                # LF and CRLF and boundaries split across reads.
+                                while True:
+                                    ends = [(pos, size) for sep, size in
+                                            ((b'\n\n', 2), (b'\r\n\r\n', 4))
+                                            if (pos := pending_sse_event.find(sep)) >= 0]
+                                    if not ends:
+                                        break
+                                    pos, size = min(ends)
+                                    event = pending_sse_event[:pos + size]
+                                    pending_sse_event = pending_sse_event[pos + size:]
+                                    if done:
+                                        stream_error = 'UPSTREAM_STREAM_AFTER_DONE'
+                                        break
+                                    lines = event.replace(b'\r\n', b'\n').split(b'\n')
+                                    data_lines = [line for line in lines
+                                                  if line.startswith(b'data:')]
+                                    if data_lines == [b'data: [DONE]']:
+                                        done = True
+                                        terminal_event = event
+                                    else:
+                                        if metric_first_token_ms is None:
+                                            for line in data_lines:
+                                                try:
+                                                    payload = json.loads(line[5:].strip())
+                                                    choices = payload.get('choices', [])
+                                                    token = any(isinstance(c, dict) and
+                                                        isinstance(c.get('delta'), dict) and
+                                                        bool(c['delta'].get('content'))
+                                                        for c in choices)
+                                                except (ValueError, AttributeError, TypeError):
+                                                    token = False
+                                                if token:
+                                                    metric_first_token_ms = int(
+                                                        (time.monotonic() - metric_started)*1000)
+                                                    break
+                                        self.wfile.write(event)
+                                        self.wfile.flush()
+                                if stream_error:
+                                    break
+                                if done and pending_sse_event.strip():
+                                    stream_error = 'UPSTREAM_STREAM_AFTER_DONE'
+                                    break
+                            if stream_error or not done or pending_sse_event.strip():
+                                code = stream_error or 'UPSTREAM_STREAM_INCOMPLETE'
+                                self.wfile.write(('\n\nevent: error\ndata: ' +
+                                    json.dumps({'error': {'code': code}}) +
+                                    '\n\n').encode('utf-8'))
+                            else:
+                                self.wfile.write(terminal_event)
+                            # A socket flush must succeed before counting a
+                            # completed stream. A disconnected client is not
+                            # an accepted response.
+                            self.wfile.flush()
+                            if not stream_error and done and not pending_sse_event.strip():
+                                metric_success = response.status == 200
+                        else:
+                            # An invalid upstream framing header is a backend
+                            # protocol failure, never a bad client request.
+                            declared_length = response.getheader('Content-Length')
+                            if declared_length is not None:
+                                try:
+                                    declared_length = int(declared_length)
+                                except (ValueError, TypeError) as error:
+                                    raise AdmissionError(502,'UPSTREAM_HTTP_FRAMING_INVALID') from error
+                                if declared_length < 0:
+                                    raise AdmissionError(502,'UPSTREAM_HTTP_FRAMING_INVALID')
+                                if declared_length > MAX_RESPONSE_BYTES:
+                                    raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            upstream = response.read(MAX_RESPONSE_BYTES+1)
+                            if len(upstream) > MAX_RESPONSE_BYTES:
+                                raise AdmissionError(502,'UPSTREAM_RESPONSE_TOO_LARGE')
+                            # Do not turn a backend's malformed or truncated
+                            # body into a successful OpenAI-compatible reply.
+                            # Validate while the lease is still held, before
+                            # emitting the client response headers.
+                            if not response.getheader('Content-Type','').lower().split(';',1)[0].strip() == 'application/json':
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID')
+                            try:
+                                decoded = json.loads(upstream.decode('utf-8'))
+                            except (ValueError, UnicodeDecodeError) as error:
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID') from error
+                            if not isinstance(decoded,dict):
+                                raise AdmissionError(502,'UPSTREAM_JSON_CONTRACT_INVALID')
+                            # A syntactically valid JSON error or empty object
+                            # cannot masquerade as successful inference.
+                            if response.status == 200 and (
+                                    not isinstance(decoded.get('choices'),list)
+                                    or not decoded['choices']
+                                    or not all(isinstance(choice,dict)
+                                               for choice in decoded['choices'])):
+                                raise AdmissionError(502,'UPSTREAM_COMPLETION_CONTRACT_INVALID')
+                            self.send_response(response.status)
+                            self.send_header('Content-Type','application/json')
+                            self.send_header('Content-Length',str(len(upstream)))
+                            self.end_headers()
+                            self.wfile.write(upstream)
+                            metric_success = response.status == 200
+                            usage = decoded.get('usage', {})
+                            if isinstance(usage, dict):
+                                ct = usage.get('completion_tokens')
+                                if type(ct) is int and ct >= 0:
+                                    metric_output_tokens = ct
+                    finally:
+                        conn.close()
+            except AdmissionError as error:
+                if not locals().get('stream_headers_sent', False):
+                    self._send(error.status,{'error':{'code':error.code}})
+                else:
+                    self.close_connection = True
+            except (ValueError,UnicodeDecodeError):
+                if not locals().get('stream_headers_sent', False):
+                    self._send(400,{'error':{'code':'BAD_REQUEST'}})
+                else:
+                    self.close_connection = True
+            except (OSError,TimeoutError,subprocess.TimeoutExpired,UpstreamHTTPException):
+                # An upstream HTTP protocol disconnect is an unavailable backend,
+                # not an unhandled handler failure. The lease exits in finally.
+                # HTTP headers cannot be sent twice after SSE has started.
+                if not locals().get('stream_headers_sent', False):
+                    self._send(503,{'error':{'code':'UPSTREAM_UNAVAILABLE'}})
+                else:
+                    self.close_connection = True
+            finally:
+                coordinator.record_inference(
+                    metric_model, int((time.monotonic()-metric_started)*1000),
+                    metric_success, first_token_ms=metric_first_token_ms,
+                    output_tokens=metric_output_tokens)
+    return Handler
+
+
+def run_servers(coordinator, token, state_dir):
+    if not token:
+        raise ValueError('EXISTING_API_KEY_REQUIRED')
+    if any(spec.get('backend_socket') for spec in coordinator.specs.values()):
+        if not os.path.ismount(BACKEND_UNIX_DIRECTORY):
+            raise AdmissionError(503, 'BACKEND_UNIX_GATE_VOLUME_NOT_MOUNTED')
+    folder = Path(state_dir)
+    folder.mkdir(mode=0o700,parents=True,exist_ok=True)
+    lockfile = folder/'per-model-gate.lock'
+    with lockfile.open('a+') as lock:
+        try:
+            fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise AdmissionError(409,'GATE_ALREADY_RUNNING') from error
+        coordinator.configure_recovery(folder)
+        coordinator.configure_metrics(folder)
+        coordinator.preflight()
+        servers = []
+        try:
+            for model,spec in coordinator.specs.items():
+                server = ThreadingHTTPServer(('127.0.0.1',spec['gate_port']),
+                                             make_handler(coordinator,model,token))
+                server.daemon_threads = True
+                servers.append(server)
+            for server in servers:
+                threading.Thread(target=server.serve_forever,daemon=True).start()
+            stop = threading.Event()
+            def on_signal(*_):
+                stop.set()
+            signal.signal(signal.SIGINT,on_signal)
+            signal.signal(signal.SIGTERM,on_signal)
+            while not stop.wait(2):
+                try:
+                    coordinator.handoff_expire()
+                except AdmissionError:
+                    # A Docker stop failure or leased model must not terminate
+                    # the sole gate process and strand a third resident.
+                    # The reservation stays set, and next tick retries.
+                    pass
+                try:
+                    coordinator.reap()
+                except (AdmissionError, OSError, subprocess.TimeoutExpired):
+                    # A transient Docker failure must not kill the only
+                    # shared gate. Transition markers are cleared by reap().
+                    # The next maintenance cycle retries eligible models.
+                    pass
+        finally:
+            for server in servers:
+                server.shutdown()
+                server.server_close()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--compose',default=str(Path(__file__).resolve().parents[1]/'compose.runtime.yml'))
+    parser.add_argument('--policy',default=str(DEFAULT_POLICY))
+    parser.add_argument('--preflight',action='store_true')
+    parser.add_argument('--serve',action='store_true')
+    parser.add_argument('--exclusive-traffic',action='store_true')
+    parser.add_argument('--state-dir',default='/home/admin1/projects/ai-core/.ai-core')
+    args = parser.parse_args(argv)
+    if args.preflight == args.serve:
+        parser.error('choose exactly one of --preflight or --serve')
+    policy = load_policy(args.policy)
+    specs = model_specs_from_compose(args.compose,policy)
+    if args.preflight:
+        print('MODEL_GATE_PREFLIGHT=PASS MODEL_COUNT='+str(len(specs))+
+              ' PORTS='+','.join(str(x['gate_port']) for x in specs.values()))
+        return 0
+    if not args.exclusive_traffic:
+        parser.error('--serve requires --exclusive-traffic')
+    key = os.environ.get('AI_CORE_API_KEY','')
+    if len(key) < 16:
+        parser.error('AI_CORE_API_KEY environment must be configured')
+    budget = verify_parent_budget(specs,policy)
+    print('MODEL_GATE_PARENT_BUDGET=PASS CPU_CORES='+str(budget['parent_cpu_cores'])+
+          ' MAX_BYTES='+str(budget['parent_memory_max']))
+    driver = ExistingContainerDriver(args.compose)
+    coordinator = Coordinator(specs,driver,max_loaded=policy['max_resident'],
+                              max_active=policy['max_active'],
+                              idle_seconds=policy['idle_seconds'])
+    print('MODEL_GATE_MODE=EXCLUSIVE_RESIDENCY')
+    run_servers(coordinator,key,args.state_dir)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (AdmissionError,ValueError) as error:
+        code = error.code if isinstance(error,AdmissionError) else str(error)
+        print('MODEL_GATE=FAIL|'+code,file=sys.stderr)
+        sys.exit(1)
