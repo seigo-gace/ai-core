@@ -505,7 +505,10 @@ class Coordinator:
             # Fail-fast traffic cannot jump ahead of clients that elected to
             # wait. Keep admission FIFO across both request classes.
             with self.wait_condition:
-                if self.waiters:
+                # A dispatched cold loader is no longer queued for an
+                # inference slot. READY fail-fast calls must not be blocked
+                # by it, while undispatched waiting callers retain priority.
+                if self._next_waiter() is not None:
                     raise AdmissionError(429, 'ADMISSION_QUEUE_BUSY')
             return self.acquire(model)
         if model not in self.specs:
