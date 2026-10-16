@@ -58,6 +58,15 @@ for path in ("/internal/handoff/status","/internal/resources/status"):
 expected_digest="$(sha256sum "$worktree/runtime/model_gate.py" | cut -d ' ' -f1)"
 image_digest="$(docker run --rm --network none --entrypoint sha256sum "$new_image" /app/runtime/model_gate.py | cut -d ' ' -f1)"
 [[ "$image_digest" == "$expected_digest" ]]
+# The existing 18080 port is reintroduced only inside this same Gate image.
+# Never displace a running legacy listener or a concurrent foreign service.
+image_cmd="$(docker image inspect -f '{{json .Config.Cmd}}' "$new_image")"
+if [[ "$image_cmd" == *"--compat-18080"* ]]; then
+  if ss -H -ltn 'sport = :18080' | grep -q LISTEN; then
+    echo AI_CORE_COMPAT_18080_CONFLICT
+    exit 76
+  fi
+fi
 
 # Only reuse the active Gate's already provisioned credential; never log it.
 export AI_CORE_API_KEY="$(docker exec ai-core-model-gate sh -c 'printf "%s" "$AI_CORE_API_KEY"')"
@@ -86,5 +95,23 @@ docker compose -p ai-core-gate -f "$compose" --project-directory "$root" --env-f
 actual_digest="$(docker exec ai-core-model-gate sha256sum /app/runtime/model_gate.py | cut -d ' ' -f1)"
 [[ "$actual_digest" == "$expected_digest" ]]
 docker exec ai-core-model-gate python3 -c 'import urllib.request; [urllib.request.urlopen("http://127.0.0.1:%d/health"%p,timeout=5).close() for p in (18181,18182,18183,18184)]'
+if [[ "$image_cmd" == *"--compat-18080"* ]]; then
+  docker exec ai-core-model-gate python3 -c '
+import json,os,urllib.error,urllib.request
+base="http://127.0.0.1:18080"
+with urllib.request.urlopen(base+"/health",timeout=5) as r:
+ assert r.status==200
+try:
+ urllib.request.urlopen(base+"/v1/models",timeout=5)
+ raise RuntimeError("COMPAT_AUTH_BYPASS")
+except urllib.error.HTTPError as e:
+ assert e.code==401
+req=urllib.request.Request(base+"/v1/models",headers={
+ "Authorization":"Bearer "+os.environ["AI_CORE_API_KEY"]})
+with urllib.request.urlopen(req,timeout=5) as r:
+ models=json.load(r)
+assert r.status==200 and len(models["data"])==4
+'
+fi
 trap - ERR
 echo "AI_CORE_GATE_REFRESH=PASS SOURCE_HEAD=$expected_head SOURCE_PARITY=PASS HEALTH=4/4 OLD_IMAGE_RETAINED=YES"
