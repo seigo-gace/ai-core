@@ -218,6 +218,44 @@ class CoordinatorTests(unittest.TestCase):
                 c.preflight()
             self.assertEqual(d.ops,[])
 
+    def test_orphaned_lease_reserves_global_capacity_after_crash(self):
+        # With three provisioned residents, one old inference may still be
+        # running after restart. Never dispatch two more at once.
+        with tempfile.TemporaryDirectory() as folder:
+            d=FakeDriver(('coder','qwen3','granite'))
+            first=Coordinator(specs(),d,max_loaded=3,max_active=2)
+            first.configure_recovery(folder)
+            first.acquire('coder')
+            recovered=Coordinator(specs(),d,max_loaded=3,max_active=2)
+            recovered.configure_recovery(folder)
+            recovered.preflight()
+            self.assertEqual(recovered.orphaned,{'coder'})
+            with recovered.lease('qwen3'):
+                with self.assertRaisesRegex(AdmissionError,'GLOBAL_CONCURRENCY_LIMIT'):
+                    recovered.acquire('granite')
+                self.assertEqual(recovered.active['granite'],0)
+            recovered._backend_slots_idle=lambda name: True
+            recovered.recover_orphans()
+            recovered.recover_orphans()
+            self.assertEqual(recovered.orphaned,set())
+            with recovered.lease('qwen3'):
+                with recovered.lease('granite'):
+                    self.assertEqual(sum(recovered.active.values()),2)
+            self.assertEqual(recovered.semaphore._value,2)
+
+    def test_multiple_orphans_quarantine_global_capacity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            d=FakeDriver(('coder','qwen3','granite'))
+            first=Coordinator(specs(),d,max_loaded=3,max_active=2)
+            first.configure_recovery(folder)
+            first.acquire('coder')
+            first.acquire('qwen3')
+            recovered=Coordinator(specs(),d,max_loaded=3,max_active=2)
+            recovered.configure_recovery(folder)
+            with self.assertRaisesRegex(AdmissionError,'GLOBAL_CONCURRENCY_LIMIT'):
+                recovered.acquire('granite')
+            self.assertEqual(recovered.active['granite'],0)
+
     def test_corrupt_lease_journal_blocks_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp)/'active-leases.json').write_text('{not valid')
