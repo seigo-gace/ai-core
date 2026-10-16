@@ -64,10 +64,18 @@ export AI_CORE_API_KEY="$(docker exec ai-core-model-gate sh -c 'printf "%s" "$AI
 [[ ${#AI_CORE_API_KEY} -ge 16 ]]
 docker compose -p ai-core-gate -f "$compose" --project-directory "$root" --env-file "$root/.env" config -q
 if docker image inspect "$old_image" >/dev/null 2>&1; then
-  echo AI_CORE_GATE_ROLLBACK_TAG_ALREADY_EXISTS
-  exit 75
+  # A prior refresh can fail *after* it switched the tag and rolled back.
+  # Safely reuse only the exact saved image currently active; never overwrite
+  # a rollback tag which belongs to a different deployment.
+  active_id="$(docker inspect -f '{{.Image}}' ai-core-model-gate)"
+  saved_id="$(docker image inspect -f '{{.Id}}' "$old_image")"
+  if [[ "$active_id" != "$saved_id" ]]; then
+    echo AI_CORE_GATE_ROLLBACK_IMAGE_MISMATCH
+    exit 75
+  fi
+else
+  docker image tag ai-core-model-gate:local "$old_image"
 fi
-docker image tag ai-core-model-gate:local "$old_image"
 
 restore_previous() {
   code="$?"
@@ -83,8 +91,23 @@ trap restore_previous ERR
 
 docker image tag "$new_image" ai-core-model-gate:local
 docker compose -p ai-core-gate -f "$compose" --project-directory "$root" --env-file "$root/.env" up -d --no-build --force-recreate gate >/dev/null
+# Container restart and socket binding are asynchronous. Do not mark a
+# successful Compose recreate as failure merely because readiness needs seconds.
+# Poll only bounded liveness and exact Source hash; no model inference.
+healthy=NO
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if docker exec ai-core-model-gate python3 -c '
+import urllib.request
+for port in (18181,18182,18183,18184):
+    urllib.request.urlopen("http://127.0.0.1:%d/health"%port,timeout=2).close()
+' >/dev/null 2>&1; then
+    healthy=YES
+    break
+  fi
+  sleep 2
+done
+[[ "$healthy" == YES ]]
 actual_digest="$(docker exec ai-core-model-gate sha256sum /app/runtime/model_gate.py | cut -d ' ' -f1)"
 [[ "$actual_digest" == "$expected_digest" ]]
-docker exec ai-core-model-gate python3 -c 'import urllib.request; [urllib.request.urlopen("http://127.0.0.1:%d/health"%p,timeout=5).close() for p in (18181,18182,18183,18184)]'
 trap - ERR
 echo "AI_CORE_GATE_REFRESH=PASS SOURCE_HEAD=$expected_head SOURCE_PARITY=PASS HEALTH=4/4 OLD_IMAGE_RETAINED=YES"
