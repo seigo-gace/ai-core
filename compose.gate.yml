@@ -9,7 +9,7 @@ services:
     container_name: ai-core-model-gate
     network_mode: host
     environment:
-      AI_CORE_API_KEY: ${AI_CORE_API_KEY:?existing_AI_CORE_API_KEY_required}
+      AI_CORE_API_KEY: ${LLAMA_SWAP_API_KEY:?existing_LLAMA_SWAP_API_KEY_required}
       AI_CORE_PARENT_CONTROL_GROUP: /ai.slice/ai-core.slice
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
