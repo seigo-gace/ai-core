@@ -1395,8 +1395,12 @@ def make_handler(coordinator, model, api_key):
                                     '\n\n').encode('utf-8'))
                             else:
                                 self.wfile.write(terminal_event)
-                                metric_success = response.status == 200
+                            # A socket flush must succeed before counting a
+                            # completed stream. A disconnected client is not
+                            # an accepted response.
                             self.wfile.flush()
+                            if not stream_error and done and not pending_sse_event.strip():
+                                metric_success = response.status == 200
                         else:
                             # An invalid upstream framing header is a backend
                             # protocol failure, never a bad client request.

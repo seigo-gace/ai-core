@@ -1711,6 +1711,29 @@ class GateHttpTests(unittest.TestCase):
         self.assertNotIn(b'data: [DONE]',stream)
         self.assertEqual(self.coord.active['coder'],0)
 
+    def test_stream_metrics_accept_only_completed_token_stream(self):
+        import time
+        def read_stream(prompt):
+            payload={'model':'/models/coder.gguf','stream':True,
+                     'messages':[{'role':'user','content':prompt}]}
+            req=request.Request(self.base+'/v1/chat/completions', method='POST',
+                data=json.dumps(payload).encode(),
+                headers={'Authorization':'Bearer EXISTING_TEST_KEY_12345',
+                         'Content-Type':'application/json'})
+            with request.urlopen(req,timeout=3) as resp:
+                return resp.read()
+        valid=read_stream('ping')
+        self.assertIn(b'data: [DONE]',valid)
+        malformed=read_stream('after-done')
+        self.assertIn(b'UPSTREAM_STREAM_AFTER_DONE',malformed)
+        deadline=time.monotonic()+1
+        while self.coord.metrics_snapshot()['window_completed']<2 and time.monotonic()<deadline:
+            time.sleep(.005)
+        sample=self.coord.metrics_snapshot()['model_metrics']['coder']
+        self.assertEqual((sample['completed'],sample['success'],sample['failed']), (2,1,1))
+        self.assertIsNotNone(sample['stream_first_token_ms_p50'])
+        self.assertIsNotNone(sample['stream_first_token_ms_p95'])
+
     def test_stream_sse_under_shared_lease(self):
         payload={'model':'/models/coder.gguf','stream':True,
                  'messages':[{'role':'user','content':'ping'}]}
