@@ -8,6 +8,7 @@ services:
     image: ai-core-model-gate:local
     container_name: ai-core-model-gate
     network_mode: host
+    cgroup_parent: ai-core.slice
     environment:
       AI_CORE_API_KEY: ${AI_CORE_API_KEY:?existing_AI_CORE_API_KEY_required}
       AI_CORE_PARENT_CONTROL_GROUP: /ai.slice/ai-core.slice
