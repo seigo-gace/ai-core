@@ -71,6 +71,102 @@ class PrivateTransportPolicyTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_stopped_backend_reaps_only_refused_unix_socket(self):
+        import socket
+        from unittest.mock import patch
+        from runtime.model_gate import ExistingContainerDriver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'coder.sock')
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                server.bind(path)
+            finally:
+                server.close()
+            self.assertTrue(Path(path).is_socket())
+            driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
+            spec = {'service': 'coder', 'backend_socket': path}
+            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
+                    patch.object(driver, 'running', return_value=False) as running, \\
+                    patch.object(driver, '_run') as command:
+                driver.start(spec)
+            self.assertFalse(Path(path).exists())
+            self.assertEqual(running.call_count, 2)
+            command.assert_called_once_with('start', 'ai-coder')
+
+    def test_live_unix_listener_is_never_removed_or_restarted(self):
+        import socket
+        from unittest.mock import patch
+        from runtime.model_gate import AdmissionError, ExistingContainerDriver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'coder.sock')
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.listen(1)
+            try:
+                driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
+                spec = {'service': 'coder', 'backend_socket': path}
+                with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
+                        patch.object(driver, 'running', return_value=False), \\
+                        patch.object(driver, '_run') as command:
+                    with self.assertRaisesRegex(
+                            AdmissionError, 'BACKEND_UNIX_SOCKET_NOT_STALE'):
+                        driver.start(spec)
+                self.assertTrue(Path(path).is_socket())
+                command.assert_not_called()
+            finally:
+                listener.close()
+
+    def test_private_socket_cleanup_refuses_regular_file_and_symlink(self):
+        from unittest.mock import patch
+        from runtime.model_gate import AdmissionError, ExistingContainerDriver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
+            safe_file = Path(tmp) / 'protected.txt'
+            safe_file.write_text('keep')
+            candidate = Path(tmp) / 'coder.sock'
+            for link in (False, True):
+                with self.subTest(symlink=link):
+                    if candidate.exists() or candidate.is_symlink():
+                        candidate.unlink()
+                    if link:
+                        candidate.symlink_to(safe_file)
+                    else:
+                        candidate.write_text('keep')
+                    spec = {'service': 'coder', 'backend_socket': str(candidate)}
+                    with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
+                            patch.object(driver, 'running', return_value=False), \\
+                            patch.object(driver, '_run') as command:
+                        with self.assertRaisesRegex(
+                                AdmissionError, 'BACKEND_UNIX_SOCKET_TYPE_UNSAFE'):
+                            driver.start(spec)
+                    self.assertTrue(candidate.exists())
+                    self.assertEqual(safe_file.read_text(), 'keep')
+                    command.assert_not_called()
+
+    def test_private_socket_cleanup_refuses_concurrent_container_restart(self):
+        import socket
+        from unittest.mock import patch
+        from runtime.model_gate import AdmissionError, ExistingContainerDriver
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / 'coder.sock')
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.close()
+            driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
+            spec = {'service': 'coder', 'backend_socket': path}
+            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
+                    patch.object(driver, 'running', side_effect=[False, True]), \\
+                    patch.object(driver, '_run') as command:
+                with self.assertRaisesRegex(
+                        AdmissionError, 'BACKEND_UNIX_CONTAINER_RESTARTED'):
+                    driver.start(spec)
+            self.assertTrue(Path(path).is_socket())
+            command.assert_not_called()
+
     def test_gate_unmounted_private_bus_rejected_before_start(self):
         from types import SimpleNamespace
         from unittest.mock import patch
