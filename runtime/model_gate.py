@@ -921,6 +921,13 @@ class Coordinator:
                     raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
                 self.handoff['expires'] = self.clock() + self.handoff.pop('ready_ttl')
                 self._persist_handoff()
+                # A handoff-only third model has never acquired an inference
+                # lease. Without this timestamp it stays resident forever:
+                # the idle reaper deliberately ignores None last-use values.
+                if needs_start:
+                    self.used[target] = self.clock()
+                elif self.used[target] is None:
+                    self.used[target] = self.clock()
                 return dict(self.handoff)
         except BaseException:
             # A failed start can already have made the target resident.
