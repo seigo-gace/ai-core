@@ -25,10 +25,16 @@ def report(compose, policy, driver=None, parent_budget=None):
     containers, resident = [], 0
     for model in items:
         spec = items[model]
-        detail = {'model': model, 'api_port': spec['backend_port'],
-                  'gate_port': spec['gate_port'], 'warm': spec['warm'],
+        detail = {'model': model, 'gate_port': spec['gate_port'],
+                  'warm': spec['warm'],
                   'configured_memory_bytes': spec['memory_limit_bytes'],
                   'configured_cpu_cores': spec['cpu_limit']}
+        if spec.get('backend_socket'):
+            detail['backend_transport'] = 'unix'
+            detail['backend_socket'] = spec['backend_socket']
+        else:
+            detail['backend_transport'] = 'tcp'
+            detail['api_port'] = spec['backend_port']
         try:
             container = driver._inspect(spec)
             running = container.get('State', {}).get('Running') is True
