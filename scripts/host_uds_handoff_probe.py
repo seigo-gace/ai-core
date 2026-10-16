@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Private Unix Gate physical 2->3->2 handoff probe; run inside Gate, no secret output."""
+"""Private Unix Gate physical 2->3->2 handoff probe; no secret output.
+
+Cold readiness is permitted up to 180 seconds by the Coordinator. Run this
+acceptance inside the already provisioned Gate with a private local result
+file, rather than as a foreground Host command (bounded to 90 seconds).
+"""
 import json
 import os
 import sys
@@ -57,7 +62,7 @@ def main():
                 request={"model":catalogue["data"][0]["id"],
                          "messages":[{"role":"user","content":"Reply OK."}],
                          "max_tokens":1,"temperature":0,"stream":False}
-                warmed=call(second,"/v1/chat/completions",request,timeout=78)
+                warmed=call(second,"/v1/chat/completions",request,timeout=210)
                 if not warmed.get("choices"):
                     raise RuntimeError("RESIDENT_PREPARATION_INFERENCE_FAILED")
                 prepared.append(second)
