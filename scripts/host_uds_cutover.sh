@@ -2,8 +2,10 @@
 set -Eeuo pipefail
 r=/home/admin1/projects/ai-core
 w="$r/.worktrees/pr3-verification-20261015"
-target=75778b66afcd397da5225466aadcc20fcd0df991
-[ "$(git -C "$w" rev-parse HEAD)" = "$target" ]
+target="$(git -C "$w" rev-parse HEAD)"
+[ "$(git -C "$w" hash-object "$w/runtime/model_gate.py")" = d7cd06b7bb6f50a544ab3fd7a8d739d245f82ebd ]
+[ "$(git -C "$w" hash-object "$w/compose.runtime.yml")" = 1ba2b2d787d09b74e8956359c65809b3c032d91d ]
+[ "$(git -C "$w" hash-object "$w/compose.gate.yml")" = e709c161e2a3d08ef7b02cf5482b148bb3ed511c ]
 [ -z "$(git -C "$w" status --porcelain)" ]
 [ -f "$r/compose.runtime.yml" ] && [ -f "$r/compose.gate.yml" ] && [ -f "$r/.env" ]
 [ -d "$r/models" ]
