@@ -56,6 +56,14 @@ def main():
         except (OSError, ValueError, KeyError):
             pass
         changes = {}
+        try:
+            _, handoff_state = call(base + "/internal/handoff/status")
+            changes["resident_after"] = handoff_state["resident"]
+            changes["resident_count_after"] = len(handoff_state["resident"])
+            changes["handoff_active_after"] = handoff_state["handoff"] is not None
+            changes["recovery_pending_after"] = handoff_state["recovery_pending"]
+        except (OSError, ValueError, KeyError):
+            changes["resident_readback"] = "UNAVAILABLE"
         if before and after:
             changes = {
                 "memory_before_bytes": int(before["memory"]["memory.current"]),
