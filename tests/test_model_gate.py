@@ -243,6 +243,20 @@ class CoordinatorTests(unittest.TestCase):
                     self.assertEqual(sum(recovered.active.values()),2)
             self.assertEqual(recovered.semaphore._value,2)
 
+    def test_orphaned_unrelated_model_blocks_temporary_third_handoff(self):
+        with tempfile.TemporaryDirectory() as folder:
+            d=FakeDriver(('coder','qwen3'))
+            old=Coordinator(specs(),d)
+            old.configure_recovery(folder)
+            old.acquire('coder')
+            after=Coordinator(specs(),d)
+            after.configure_recovery(folder)
+            with self.assertRaisesRegex(AdmissionError,'ORPHANED_LEASE_RECOVERY_PENDING'):
+                after.handoff_begin('qwen3','granite','probe-owner')
+            self.assertEqual(d.loaded,{'coder','qwen3'})
+            self.assertEqual(after.handoff,None)
+            self.assertEqual(d.ops,[])
+
     def test_multiple_orphans_quarantine_global_capacity(self):
         with tempfile.TemporaryDirectory() as folder:
             d=FakeDriver(('coder','qwen3','granite'))
