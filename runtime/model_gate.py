@@ -152,6 +152,8 @@ def model_specs_from_compose(path, policy):
             specs[model]['backend_socket'] = expected_socket
         else:
             specs[model]['backend_port'] = int(parts[1])
+    if len({bool(v.get('backend_socket')) for v in specs.values()}) > 1:
+        raise ValueError('MIXED_BACKEND_TRANSPORT')
     tcp_ports = [v['backend_port'] for v in specs.values()
                  if 'backend_port' in v]
     if len(set(tcp_ports)) != len(tcp_ports):
