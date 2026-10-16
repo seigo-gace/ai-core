@@ -218,6 +218,89 @@ class CoordinatorTests(unittest.TestCase):
                 c.preflight()
             self.assertEqual(d.ops,[])
 
+    def test_durable_handoff_restarts_and_reconciles_owned_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = FakeDriver(('coder', 'qwen3'))
+            first = Coordinator(specs(), d, handoff_budget_check=lambda: {
+                'selected_memory_ceiling': 27, 'selected_cpu_ceiling': 6})
+            first.configure_recovery(tmp)
+            first.preflight()
+            ticket = first.handoff_begin('coder', 'granite', 'project-a')
+            self.assertEqual(len(d.loaded), 3)
+            journal = json.loads((Path(tmp) / 'handoff-state.json').read_text())
+            self.assertEqual(journal['handoff']['ticket'], ticket['ticket'])
+            self.assertEqual(journal['handoff']['final_action'], None)
+            # Simulate the Gate exiting without running its in-memory cleanup.
+            second = Coordinator(specs(), d)
+            second.configure_recovery(tmp)
+            second.preflight()
+            self.assertEqual(len(d.loaded), 3)
+            with self.assertRaisesRegex(AdmissionError, 'HANDOFF_IN_PROGRESS'):
+                second.handoff_begin('qwen3', 'ministral', 'project-b')
+            with self.assertRaisesRegex(AdmissionError, 'ORPHANED_LEASE'):
+                second.handoff_finish('project-a', ticket=ticket['ticket'])
+            second._backend_slots_idle = lambda model: True
+            second.recover_orphans()
+            second.recover_orphans()
+            second.handoff_finish('project-a', ticket=ticket['ticket'])
+            self.assertEqual(d.loaded, {'qwen3', 'granite'})
+            self.assertIsNone(second.handoff)
+            self.assertIsNone(json.loads((Path(tmp) / 'handoff-state.json').read_text())['handoff'])
+
+    def test_committed_handoff_completion_survives_failed_stop_restart(self):
+        class StopOnce(FakeDriver):
+            fail = True
+            def stop(self, spec):
+                if spec['service'] == 'coder' and self.fail:
+                    raise OSError('stop interrupted')
+                super().stop(spec)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = StopOnce(('coder', 'qwen3'))
+            first = Coordinator(specs(), d, handoff_budget_check=lambda: {
+                'selected_memory_ceiling': 27, 'selected_cpu_ceiling': 6})
+            first.configure_recovery(tmp)
+            first.preflight()
+            ticket = first.handoff_begin('coder', 'granite', 'p')
+            with self.assertRaisesRegex(OSError, 'stop interrupted'):
+                first.handoff_finish('p', ticket=ticket['ticket'])
+            self.assertEqual(json.loads((Path(tmp) / 'handoff-state.json').read_text())
+                             ['handoff']['final_action'], 'complete')
+            after = Coordinator(specs(), d)
+            after.configure_recovery(tmp)
+            after.preflight()
+            with self.assertRaisesRegex(AdmissionError, 'HANDOFF_OUTCOME_ALREADY_COMMITTED'):
+                after.handoff_finish('p', completed=False, ticket=ticket['ticket'])
+            d.fail = False
+            after._backend_slots_idle = lambda model: True
+            after.recover_orphans()
+            after.recover_orphans()
+            # Even after deadline expiry, a committed completion finishes
+            # the old-model stop instead of aborting the new model.
+            after.handoff['expires'] = after.clock() - 1
+            self.assertTrue(after.handoff_expire())
+            self.assertEqual(d.loaded, {'qwen3', 'granite'})
+            self.assertIsNone(after.handoff)
+
+    def test_corrupt_handoff_journal_denies_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'handoff-state.json').write_text('{"schema":1,"handoff":{"from":"coder"}}')
+            controller = Coordinator(specs(), FakeDriver())
+            with self.assertRaisesRegex(AdmissionError, 'HANDOFF_JOURNAL_CORRUPT'):
+                controller.configure_recovery(tmp)
+
+    def test_handoff_journal_write_failure_prevents_third_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = FakeDriver(('coder', 'qwen3'))
+            controller = Coordinator(specs(), d, handoff_budget_check=lambda: {
+                'selected_memory_ceiling': 27, 'selected_cpu_ceiling': 6})
+            controller.configure_recovery(tmp)
+            with patch.object(controller, '_persist_handoff',
+                              side_effect=AdmissionError(503, 'HANDOFF_JOURNAL_WRITE_FAILED')):
+                with self.assertRaisesRegex(AdmissionError, 'HANDOFF_JOURNAL_WRITE_FAILED'):
+                    controller.handoff_begin('coder', 'granite', 'p')
+            self.assertEqual(d.loaded, {'coder', 'qwen3'})
+            self.assertIsNone(controller.handoff)
+
     def test_orphaned_lease_reserves_global_capacity_after_crash(self):
         # With three provisioned residents, one old inference may still be
         # running after restart. Never dispatch two more at once.
