@@ -23,13 +23,14 @@ OWNER = "ai-core-host-restart-acceptance"
 GATE_PROBE = """
 import json, os, sys, urllib.request
 headers = {'Authorization': 'Bearer ' + os.environ['AI_CORE_API_KEY']}
-path, payload = sys.argv[1:3]
+path, payload, model = sys.argv[1:4]
+ports = {'granite': 18181, 'qwen3': 18182, 'ministral': 18183, 'coder': 18184}
 data = None if payload == '-' else payload.encode('utf-8')
 if data is not None:
     headers['Content-Type'] = 'application/json'
-req = urllib.request.Request('http://127.0.0.1:18181' + path,
+req = urllib.request.Request('http://127.0.0.1:' + str(ports[model]) + path,
                              headers=headers, data=data)
-with urllib.request.urlopen(req, timeout=180) as response:
+with urllib.request.urlopen(req, timeout=225) as response:
     print(response.read(65536).decode('utf-8'))
 """
 
@@ -42,10 +43,10 @@ def run(argv, timeout=30):
     return result.stdout.strip()
 
 
-def gate(path, payload=None, timeout=210):
+def gate(path, payload=None, timeout=240, model='granite'):
     value = '-' if payload is None else json.dumps(payload, separators=(',', ':'))
     raw = run(["docker", "exec", "ai-core-model-gate", "python3", "-c",
-               GATE_PROBE, path, value], timeout)
+               GATE_PROBE, path, value, model], timeout)
     return json.loads(raw)
 
 
@@ -145,9 +146,19 @@ def main():
                 initial["memory_max"] != 36 * 1024**3 or
                 initial["cpu_max"].split()[0] == "max"):
             raise RuntimeError("PARENT_LIMIT_CHANGED_NO_MUTATION")
+        # The private backend Unix sockets are owned and safely reaped by
+        # the shared Coordinator. Never bypass it with raw Docker start.
         for name in ("granite", "qwen3"):
-            run(["docker", "start", MODELS[name][0]], timeout=60)
+            catalogue = gate("/v1/models", model=name)
+            requested_id = catalogue["data"][0]["id"]
+            answer = gate("/v1/chat/completions", {
+                "model": requested_id,
+                "messages": [{"role": "user", "content": "Reply OK."}],
+                "max_tokens": 1, "temperature": 0, "stream": False,
+            }, timeout=240, model=name)
             started.append(name)
+            if not answer.get("choices"):
+                raise RuntimeError("RESIDENT_PREPARATION_INFERENCE_FAILED")
         deadline = time.monotonic() + 150
         while not all(backend_health(name) for name in started):
             if time.monotonic() >= deadline:
