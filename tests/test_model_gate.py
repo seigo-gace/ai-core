@@ -1219,13 +1219,57 @@ class ExistingContainerTests(unittest.TestCase):
             if args[1]=='stop':
                 self.record['State']['Running']=False
             return SimpleNamespace(returncode=0,stdout='')
-        with patch('runtime.model_gate.subprocess.run',side_effect=run):
+        with patch('runtime.model_gate.subprocess.run',side_effect=run), \
+                patch.object(self.driver, '_backend_slots_idle', return_value=True):
             self.driver.start(self.spec)
             self.assertTrue(self.driver.running(self.spec))
             self.driver.stop(self.spec)
         self.assertEqual([args[1] for args in calls if args[1] in ('start','stop')],
                          ['start','stop'])
         self.assertTrue(all('compose' not in args for args in calls))
+    def test_busy_direct_backend_cannot_be_evicted_without_a_coordinator_lease(self):
+        self.record['State']['Running'] = True
+        commands = []
+        def docker(args, **kwargs):
+            commands.append(args)
+            if args[1] == 'inspect':
+                return SimpleNamespace(returncode=0, stdout=json.dumps([self.record]))
+            if args[1] == 'stop':
+                self.record['State']['Running'] = False
+            return SimpleNamespace(returncode=0, stdout='')
+        def response(processing, status=200):
+            body = json.dumps([{'is_processing': processing}]).encode('utf-8')
+            return SimpleNamespace(status=status, read=lambda size: body)
+        with patch('runtime.model_gate.subprocess.run', side_effect=docker), \
+                patch('runtime.model_gate.http.client.HTTPConnection') as conn:
+            conn.return_value.getresponse.return_value = response(True)
+            with self.assertRaisesRegex(AdmissionError, 'BACKEND_SLOTS_BUSY_OR_UNVERIFIED'):
+                self.driver.stop(self.spec)
+            self.assertFalse(any(cmd[1] == 'stop' for cmd in commands))
+            self.assertTrue(self.record['State']['Running'])
+            conn.return_value.getresponse.return_value = response(False)
+            self.driver.stop(self.spec)
+            self.assertFalse(self.record['State']['Running'])
+            self.assertEqual(len([cmd for cmd in commands if cmd[1] == 'stop']), 1)
+
+    def test_missing_or_invalid_slots_never_authorizes_docker_stop(self):
+        self.record['State']['Running'] = True
+        commands = []
+        def docker(args, **kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stdout=json.dumps([self.record]))
+        with patch('runtime.model_gate.subprocess.run', side_effect=docker), \
+                patch('runtime.model_gate.http.client.HTTPConnection') as conn:
+            for bad in (
+                    SimpleNamespace(status=404, read=lambda size: b''),
+                    SimpleNamespace(status=200, read=lambda size: b'[]'),
+                    SimpleNamespace(status=200, read=lambda size: b'[{}]'),
+                    SimpleNamespace(status=200, read=lambda size: b'invalid-json')):
+                conn.return_value.getresponse.return_value = bad
+                with self.assertRaisesRegex(AdmissionError, 'BACKEND_SLOTS_BUSY_OR_UNVERIFIED'):
+                    self.driver.stop(self.spec)
+            self.assertFalse(any(cmd[1] == 'stop' for cmd in commands))
+
     def test_wrong_parent_or_limits_fail_closed(self):
         def run(args,**kwargs):
             return SimpleNamespace(returncode=0,stdout=json.dumps([self.record]))
