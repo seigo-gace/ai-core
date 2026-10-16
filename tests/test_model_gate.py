@@ -1054,6 +1054,32 @@ class GateHttpTests(unittest.TestCase):
         status,data=self.req('/v1/models')
         self.assertEqual(status,200)
         self.assertEqual(data['data'][0]['id'],'/models/coder.gguf')
+    def test_authenticated_shared_resource_status_uses_physical_cgroup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for key,value in {'memory.current':'12345','memory.high':'23456',
+                              'memory.max':'34567','memory.swap.current':'0',
+                              'cpu.max':'600000 100000',
+                              'cpu.stat':'usage_usec 321\\nnr_throttled 7\\n',
+                              'memory.events':'oom 0\\noom_kill 0\\n'}.items():
+                (root/key).write_text(value)
+            with patch('runtime.model_gate.parent_cgroup_folder',return_value=root):
+                status,data=self.req('/internal/resources/status')
+            self.assertEqual(status,200)
+            self.assertEqual(data['memory']['memory.current'],'12345')
+            self.assertEqual(data['cpu_max'],'600000 100000')
+            self.assertEqual(data['cpu_stat']['nr_throttled'],7)
+            self.assertEqual(data['memory_events']['oom_kill'],0)
+            self.assertEqual(data['queued'],0)
+            self.assertEqual(data['active']['coder'],0)
+            (root/'memory.current').unlink()
+            with patch('runtime.model_gate.parent_cgroup_folder',return_value=root):
+                status,data=self.req('/internal/resources/status')
+            self.assertEqual(status,503)
+            self.assertEqual(data['error']['code'],'RESOURCE_READBACK_UNAVAILABLE')
+        status,_=self.req('/internal/resources/status',auth=False)
+        self.assertEqual(status,401)
+
     def test_authenticated_running_source_fingerprint(self):
         import hashlib
         from runtime import model_gate
