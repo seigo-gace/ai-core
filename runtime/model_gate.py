@@ -456,13 +456,39 @@ class Coordinator:
                           .read_text().strip())
         except (OSError, ValueError) as error:
             raise AdmissionError(503, 'HANDOFF_MEMORY_CURRENT_UNAVAILABLE') from error
-        # A newly started backend can use its entire allowed container
-        # memory even while its initial model weights are loading.
+        # A newly started backend can use its entire container ceiling
+        # while loading. Keep 1 GiB below High, without treating clean,
+        # *unmapped* cache left by stopped models as pinned RAM.
         largest = max(item['memory_limit_bytes'] for item in self.specs.values())
-        if current + largest + 1024**3 > budget['parent_memory_high']:
-            raise AdmissionError(429, 'HANDOFF_INSUFFICIENT_LIVE_HEADROOM')
+        projected_live = current + largest + 1024**3
+        cache_allowance = 0
+        if projected_live > budget['parent_memory_high']:
+            try:
+                stats = {}
+                required = {'file', 'file_mapped', 'file_dirty',
+                            'file_writeback', 'shmem'}
+                for line in (parent_cgroup_folder() / 'memory.stat').read_text().splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] in required:
+                        stats[fields[0]] = int(fields[1])
+                if (set(stats) != required or any(v < 0 for v in stats.values())):
+                    raise ValueError('INVALID_MEMORY_STAT')
+            except (OSError, ValueError) as error:
+                raise AdmissionError(503, 'HANDOFF_MEMORY_STAT_UNAVAILABLE') from error
+            # Subtract mapped pages, dirty/writeback pages and tmpfs before
+            # discounting even clean page cache. Admit only half the remaining
+            # *unmapped clean file* estimate; Linux memory.high must still
+            # reclaim it. Never lower the actual cgroup limits.
+            clean_unmapped = max(
+                0, stats['file'] - stats['file_mapped']
+                   - stats['file_dirty'] - stats['file_writeback']
+                   - stats['shmem'])
+            cache_allowance = clean_unmapped // 2
+            if projected_live - cache_allowance > budget['parent_memory_high']:
+                raise AdmissionError(429, 'HANDOFF_INSUFFICIENT_LIVE_HEADROOM')
         return {**budget, 'selected_memory_ceiling': projected,
-                'parent_memory_current': current}
+                'parent_memory_current': current,
+                'estimated_clean_cache_allowance': cache_allowance}
 
     def handoff_begin(self, previous, target, owner, ttl=120):
         """Reserve one temporary third resident; no HTTP/public API implied.
