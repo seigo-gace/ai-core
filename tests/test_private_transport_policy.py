@@ -29,3 +29,34 @@ class PrivateTransportPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'BACKEND_UNIX_TCP_PUBLISHED'):
                 model_specs_from_compose(
                     file, load_policy(ROOT / 'runtime/model-policy.yaml'))
+
+    def test_unix_http_connection_roundtrip(self):
+        import socketserver
+        import threading
+        from runtime.model_gate import backend_http_connection
+
+        class Respond(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(8192)
+                self.request.sendall(
+                    b'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nOK')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = str(Path(tmp) / 'model.sock')
+            server = socketserver.UnixStreamServer(socket_path, Respond)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = backend_http_connection(
+                    {'backend_socket': socket_path}, timeout=3, upstream=True)
+                try:
+                    connection.request('GET', '/health')
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b'OK')
+                finally:
+                    connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
