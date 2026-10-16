@@ -39,7 +39,7 @@ class PrivateTransportPolicyTests(unittest.TestCase):
             def handle(self):
                 self.request.recv(8192)
                 self.request.sendall(
-                    b'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nOK')
+                    b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
 
         with tempfile.TemporaryDirectory() as tmp:
             socket_path = str(Path(tmp) / 'model.sock')
