@@ -1060,8 +1060,8 @@ class GateHttpTests(unittest.TestCase):
             for key,value in {'memory.current':'12345','memory.high':'23456',
                               'memory.max':'34567','memory.swap.current':'0',
                               'cpu.max':'600000 100000',
-                              'cpu.stat':'usage_usec 321\\nnr_throttled 7\\n',
-                              'memory.events':'oom 0\\noom_kill 0\\n'}.items():
+                              'cpu.stat':'usage_usec 321\nnr_throttled 7\n',
+                              'memory.events':'oom 0\noom_kill 0\n'}.items():
                 (root/key).write_text(value)
             with patch('runtime.model_gate.parent_cgroup_folder',return_value=root):
                 status,data=self.req('/internal/resources/status')
