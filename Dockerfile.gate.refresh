@@ -6,3 +6,6 @@ ARG GATE_BASE_IMAGE
 FROM ${GATE_BASE_IMAGE}
 WORKDIR /app
 COPY . /app/runtime/
+
+# Reuse the prior fully provisioned image and use this Gate for legacy OpenAI API.
+CMD ["python3", "/app/runtime/model_gate.py", "--serve", "--exclusive-traffic", "--state-dir", "/run/ai-core", "--compat-18080"]
