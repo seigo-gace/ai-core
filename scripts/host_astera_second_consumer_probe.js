@@ -6,11 +6,14 @@ const OpenAICompatAdapter = require('/app/src/llm/providers/openai-compatible.js
 async function main() {
   let key = fs.readFileSync(0, 'utf8').trim();
   if (key.length < 16 || key.length > 4096) throw new Error('EXISTING_GATE_AUTH_UNAVAILABLE');
-  const {res,data} = await fetchJson('http://127.0.0.1:18181/v1/models', {
+  const legacy = process.argv[3] === 'legacy';
+  if (process.argv[3] && !legacy) throw new Error('INVALID_GATE_SELECT');
+  const gatePort = legacy ? 18080 : 18181;
+  const {res,data} = await fetchJson('http://127.0.0.1:' + gatePort + '/v1/models', {
     method: 'GET', headers: {Authorization: 'Bearer ' + key}, timeoutMs: 10000
   });
   const authenticated = res.status === 200 &&
-    Array.isArray(data.data) && data.data.length === 1 &&
+    Array.isArray(data.data) && data.data.length === (legacy ? 4 : 1) &&
     typeof data.data[0]?.id === 'string' && data.data[0].id.length > 0;
   const mode = process.argv[2] || 'catalogue';
   if (mode !== 'catalogue' && mode !== 'inference') {
@@ -37,7 +40,7 @@ async function main() {
   // Use the exact existing Astera v8 product adapter (not a hand-built POST).
   // Options are confined to this short-lived process, never its product config.
   const adapter = new OpenAICompatAdapter({
-    baseUrl: 'http://127.0.0.1:18181',
+    baseUrl: 'http://127.0.0.1:' + gatePort,
     apiKey: key,
     model: data.data[0].id
   });
@@ -52,7 +55,8 @@ async function main() {
   process.stdout.write(JSON.stringify({
     probe: 'AI_CORE_SECOND_PRODUCT_ASTERA_V8', mode,
     runtime: 'existing-astera-v8-node', adapter: 'OpenAICompatAdapter',
-    gate: 'granite', authenticated: true, http_status: res.status,
+    gate: legacy ? 'compat-18080' : 'granite', authenticated: true,
+    http_status: res.status,
     model_count: data.data.length,
     inference: answerValid ? 'PASS' : 'FAIL',
     duration_ms: durationMs,
