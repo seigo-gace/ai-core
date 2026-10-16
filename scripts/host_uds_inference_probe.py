@@ -44,8 +44,10 @@ def main():
         model_id = catalogue["data"][0]["id"]
         request = {"model": model_id, "messages": [{"role": "user", "content": "Reply OK."}],
                    "max_tokens": 1, "temperature": 0, "stream": False}
+        # Coordinator may spend up to 180s on cold startup. A 78s client
+        # deadline falsely classifies a still-loading model as failed.
         status, answer = call(base + "/v1/chat/completions",
-                              data=json.dumps(request).encode("utf-8"), timeout=78)
+                              data=json.dumps(request).encode("utf-8"), timeout=210)
         choice_ok = bool(isinstance(answer.get("choices"), list) and answer["choices"]
                          and isinstance(answer["choices"][0], dict)
                          and isinstance(answer["choices"][0].get("message"), dict))
@@ -88,6 +90,11 @@ def main():
             pass
         emit(model=model, result="FAIL", http_status=error.code,
              error_code=str(code)[:72],
+             elapsed_s=round(time.monotonic() - started, 3))
+        return 1
+    except TimeoutError:
+        emit(model=model, result="FAIL", error_type="CLIENT_TIMEOUT_NOT_CORE_START_FAILURE",
+             client_timeout_s=210,
              elapsed_s=round(time.monotonic() - started, 3))
         return 1
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
