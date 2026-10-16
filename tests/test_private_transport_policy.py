@@ -86,8 +86,8 @@ class PrivateTransportPolicyTests(unittest.TestCase):
             self.assertTrue(Path(path).is_socket())
             driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
             spec = {'service': 'coder', 'backend_socket': path}
-            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
-                    patch.object(driver, 'running', return_value=False) as running, \\
+            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \
+                    patch.object(driver, 'running', return_value=False) as running, \
                     patch.object(driver, '_run') as command:
                 driver.start(spec)
             self.assertFalse(Path(path).exists())
@@ -107,8 +107,8 @@ class PrivateTransportPolicyTests(unittest.TestCase):
             try:
                 driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
                 spec = {'service': 'coder', 'backend_socket': path}
-                with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
-                        patch.object(driver, 'running', return_value=False), \\
+                with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \
+                        patch.object(driver, 'running', return_value=False), \
                         patch.object(driver, '_run') as command:
                     with self.assertRaisesRegex(
                             AdmissionError, 'BACKEND_UNIX_SOCKET_NOT_STALE'):
@@ -136,8 +136,8 @@ class PrivateTransportPolicyTests(unittest.TestCase):
                     else:
                         candidate.write_text('keep')
                     spec = {'service': 'coder', 'backend_socket': str(candidate)}
-                    with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
-                            patch.object(driver, 'running', return_value=False), \\
+                    with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \
+                            patch.object(driver, 'running', return_value=False), \
                             patch.object(driver, '_run') as command:
                         with self.assertRaisesRegex(
                                 AdmissionError, 'BACKEND_UNIX_SOCKET_TYPE_UNSAFE'):
@@ -158,8 +158,8 @@ class PrivateTransportPolicyTests(unittest.TestCase):
             listener.close()
             driver = ExistingContainerDriver(ROOT / 'compose.runtime.yml')
             spec = {'service': 'coder', 'backend_socket': path}
-            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \\
-                    patch.object(driver, 'running', side_effect=[False, True]), \\
+            with patch('runtime.model_gate.BACKEND_UNIX_DIRECTORY', tmp), \
+                    patch.object(driver, 'running', side_effect=[False, True]), \
                     patch.object(driver, '_run') as command:
                 with self.assertRaisesRegex(
                         AdmissionError, 'BACKEND_UNIX_CONTAINER_RESTARTED'):
