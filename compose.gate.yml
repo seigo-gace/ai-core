@@ -16,6 +16,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - gate_state:/run/ai-core
+      - ai-core-backend-bus:/run/ai-core-backend
     read_only: true
     tmpfs:
       - /tmp:mode=1777,size=16m
@@ -32,3 +33,5 @@ services:
       start_period: 15s
 volumes:
   gate_state:
+  ai-core-backend-bus:
+    name: ai-core-backend-bus
