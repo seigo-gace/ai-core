@@ -270,6 +270,31 @@ class CoordinatorTests(unittest.TestCase):
                 recovered.acquire('granite')
             self.assertEqual(recovered.active['granite'],0)
 
+    def test_recovery_journal_failure_keeps_orphan_capacity_reserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            driver=FakeDriver(('coder','qwen3','granite'))
+            before=Coordinator(specs(),driver,max_loaded=3,max_active=2)
+            before.configure_recovery(folder)
+            before.acquire('coder')
+            after=Coordinator(specs(),driver,max_loaded=3,max_active=2)
+            after.configure_recovery(folder)
+            after.preflight()
+            after._backend_slots_idle=lambda _:True
+            after.recover_orphans()
+            self.assertEqual(after.orphaned,{'coder'})
+            with patch.object(after,'_persist_leases',
+                              side_effect=AdmissionError(503,'LEASE_JOURNAL_WRITE_FAILED')):
+                with self.assertRaisesRegex(AdmissionError,'LEASE_JOURNAL_WRITE_FAILED'):
+                    after.recover_orphans()
+            self.assertEqual(after.orphaned,{'coder'})
+            self.assertEqual(after.orphan_idle_samples['coder'],2)
+            with after.lease('qwen3'):
+                with self.assertRaisesRegex(AdmissionError,'GLOBAL_CONCURRENCY_LIMIT'):
+                    after.acquire('granite')
+            after.recover_orphans()
+            self.assertEqual(after.orphaned,set())
+            self.assertEqual(json.loads((Path(folder)/'active-leases.json').read_text())['active']['coder'],0)
+
     def test_corrupt_lease_journal_blocks_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp)/'active-leases.json').write_text('{not valid')
