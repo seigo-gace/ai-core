@@ -43,21 +43,28 @@ def main():
         first=resource("coder")
         before=state("coder")
         original=before["resident"]
-        if len(original)==1:
-            # Prepare a second resident exclusively via the public Gate lease;
-            # never start a backend directly or bypass shared Coordinator.
-            second=next(x for x in PORT if x not in original)
-            catalogue=call(second,"/v1/models",timeout=8)
-            request={"model":catalogue["data"][0]["id"],
-                     "messages":[{"role":"user","content":"Reply OK."}],
-                     "max_tokens":1,"temperature":0,"stream":False}
-            warmed=call(second,"/v1/chat/completions",request,timeout=55)
-            if not warmed.get("choices"):
-                raise RuntimeError("SECOND_RESIDENT_WARMUP_INFERENCE_FAILED")
+        if (any(before["active"].values()) or before["handoff"] is not None
+                or before["recovery_pending"] or first["queued"]):
+            result["reason"]="NOT_QUIESCENT_PREPARATION_BLOCKED"
+            return 2
+        if len(original)<2:
+            # All models are cold-on-demand and the idle reaper may return to
+            # zero while the other product is testing. Prepare only the missing
+            # residents via the shared authenticated Gate, never direct Docker.
+            prepared=[]
+            for second in [x for x in PORT if x not in original][:2-len(original)]:
+                catalogue=call(second,"/v1/models",timeout=8)
+                request={"model":catalogue["data"][0]["id"],
+                         "messages":[{"role":"user","content":"Reply OK."}],
+                         "max_tokens":1,"temperature":0,"stream":False}
+                warmed=call(second,"/v1/chat/completions",request,timeout=78)
+                if not warmed.get("choices"):
+                    raise RuntimeError("RESIDENT_PREPARATION_INFERENCE_FAILED")
+                prepared.append(second)
             first=resource("coder")
             before=state("coder")
             original=before["resident"]
-            result["second_resident_prepared_via_gate"]=second
+            result["prepared_via_gate"]=prepared
         if not(len(original)==2 and not any(before["active"].values())
                and before["handoff"] is None and not before["recovery_pending"]
                and first["queued"]==0):
