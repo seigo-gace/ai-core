@@ -638,7 +638,10 @@ class Coordinator:
         with self.lock:
             if self.handoff or self.transitioning:
                 raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
-            if previous in self.orphaned or target in self.orphaned:
+            # A third resident may be started only after every old inference
+            # from an interrupted Gate process has been reconciled. An orphan
+            # unrelated to `previous` and `target` is still a live resource.
+            if self.orphaned:
                 raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
             loaded = self.running()
             if len(loaded) > self.max_loaded:
