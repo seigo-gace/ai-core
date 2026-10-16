@@ -196,6 +196,31 @@ class CoordinatorTests(unittest.TestCase):
             with c.wait_condition:
                 c.waiters.remove(queued)
 
+    def test_multiple_callers_alternate_when_waiting(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        a1,a2,b1=object(),object(),object()
+        with c.wait_condition:
+            c.waiters[:]=[a1,a2,b1]
+            c.waiter_clients.update({a1:'alpha',a2:'alpha',b1:'beta'})
+            self.assertIs(c._next_waiter(),a1)
+            c.last_served_client='alpha'
+            self.assertIs(c._next_waiter(),b1)
+            c.waiters.remove(b1)
+            c.last_served_client='beta'
+            self.assertIs(c._next_waiter(),a1)
+            c.waiters.remove(a1)
+            self.assertIs(c._next_waiter(),a2)
+
+    def test_client_label_validation_and_metadata_reclamation(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        for label in ('bad client', '', 'x'*65, 'a/b', 'é'):
+            with self.assertRaisesRegex(AdmissionError,'INVALID_CLIENT_LABEL'):
+                c.acquire_wait('coder',wait_seconds=0.1,client=label)
+        with c.lease('coder',wait_seconds=0.3,client='project-1'):
+            self.assertEqual(c.last_served_client,'project-1')
+        self.assertEqual(c.waiters,[])
+        self.assertEqual(c.waiter_clients,{})
+
     def test_waiting_queue_rejects_over_capacity_without_leak(self):
         c=Coordinator(specs(),FakeDriver(('coder',)))
         c.waiters=[object() for _ in range(64)]
