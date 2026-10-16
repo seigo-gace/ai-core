@@ -377,6 +377,8 @@ class Coordinator:
                 if self.waiters:
                     raise AdmissionError(429, 'ADMISSION_QUEUE_BUSY')
             return self.acquire(model)
+        if model not in self.specs:
+            raise AdmissionError(404, 'UNKNOWN_MODEL')
         deadline = self.clock() + wait_seconds
         ticket = object()
         with self.wait_condition:
@@ -395,8 +397,17 @@ class Coordinator:
                 # The Coordinator's own lock must remain independently
                 # releasable throughout cold start, eviction and readiness.
                 try:
-                    return self.acquire(model)
+                    acquired = self.acquire(model)
+                    # A cold Docker load may complete after the caller's
+                    # deadline. Never return an already-expired inference
+                    # lease, and always release the reserved global slot.
+                    if self.clock() >= deadline:
+                        self.release(model)
+                        raise AdmissionError(429, 'ADMISSION_DEADLINE_EXPIRED')
+                    return acquired
                 except AdmissionError as error:
+                    if error.code == 'ADMISSION_DEADLINE_EXPIRED':
+                        raise
                     if error.status != 429:
                         raise
                 with self.wait_condition:
