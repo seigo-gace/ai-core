@@ -529,8 +529,8 @@ class CoordinatorTests(unittest.TestCase):
             folder=Path(tmp)
             (folder/'memory.current').write_text('30307172352')
             (folder/'memory.stat').write_text(
-                'file 20343791616\\nfile_mapped 10338078720\\n'
-                'file_dirty 0\\nfile_writeback 0\\nshmem 0\\n')
+                'file 20343791616\nfile_mapped 10338078720\n'
+                'file_dirty 0\nfile_writeback 0\nshmem 0\n')
             with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
                 with patch('runtime.model_gate.parent_cgroup_folder',return_value=folder):
                     result=c._verify_handoff_budget()
@@ -539,8 +539,8 @@ class CoordinatorTests(unittest.TestCase):
                     # The same total file usage is NOT headroom when most of
                     # its pages are mapped by active models.
                     (folder/'memory.stat').write_text(
-                        'file 20343791616\\nfile_mapped 20000000000\\n'
-                        'file_dirty 0\\nfile_writeback 0\\nshmem 0\\n')
+                        'file 20343791616\nfile_mapped 20000000000\n'
+                        'file_dirty 0\nfile_writeback 0\nshmem 0\n')
                     with self.assertRaisesRegex(AdmissionError,
                                                 'HANDOFF_INSUFFICIENT_LIVE_HEADROOM'):
                         c._verify_handoff_budget()
@@ -565,8 +565,8 @@ class CoordinatorTests(unittest.TestCase):
             if str(path).endswith('/memory.current'):
                 return str(27*1024**3)
             if str(path).endswith('/memory.stat'):
-                return ('file 0\\nfile_mapped 0\\nfile_dirty 0\\n'
-                        'file_writeback 0\\nshmem 0\\n')
+                return ('file 0\nfile_mapped 0\nfile_dirty 0\n'
+                        'file_writeback 0\nshmem 0\n')
             return real_read(path,*args,**kwargs)
         with patch('runtime.model_gate.verify_parent_budget',return_value=budget):
             with patch('runtime.model_gate.subprocess.run',return_value=process):
