@@ -112,23 +112,30 @@ def model_specs_from_compose(path, policy):
     return specs
 
 
-def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
+def parent_cgroup_folder(*, cgroup_root=Path('/sys/fs/cgroup'),
                          control_group=None):
-    """Read current parent cgroup ceilings; never overwrite approved limits."""
+    """Resolve the same read-only Host parent in normal and handoff admission."""
     if control_group is None:
-        # A Dockerized Gate reads the existing Host cgroup read-only instead
-        # of requiring systemd inside its isolated container.
         control_group = os.environ.get('AI_CORE_PARENT_CONTROL_GROUP') or None
     if control_group is None:
-        r = subprocess.run(['systemctl','show','ai-core.slice','-p',
-                            'ControlGroup','--value'], capture_output=True,
-                           text=True, timeout=8, check=False)
+        r = subprocess.run(['systemctl', 'show', 'ai-core.slice',
+                            '-p', 'ControlGroup', '--value'],
+                           capture_output=True, text=True, timeout=8, check=False)
         if r.returncode or not r.stdout.strip():
             raise AdmissionError(503, 'PARENT_SLICE_MISSING')
         control_group = r.stdout.strip()
-    if not control_group.startswith('/') or '..' in Path(control_group).parts:
+    if (not isinstance(control_group, str) or
+            not control_group.startswith('/') or
+            '..' in Path(control_group).parts):
         raise AdmissionError(503, 'INVALID_CONTROL_GROUP')
-    folder = cgroup_root / control_group.lstrip('/')
+    return cgroup_root / control_group.lstrip('/')
+
+
+def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
+                         control_group=None):
+    """Read current parent cgroup ceilings; never overwrite approved limits."""
+    folder = parent_cgroup_folder(cgroup_root=cgroup_root,
+                                  control_group=control_group)
     try:
         mem_max = int((folder/'memory.max').read_text().strip())
         mem_high = int((folder/'memory.high').read_text().strip())
@@ -444,15 +451,9 @@ class Coordinator:
         # A theoretical 3-container ceiling is insufficient when other
         # work/cache already occupies the parent. Read live usage before
         # starting the third backend; keep 1 GiB below the established High.
-        r = subprocess.run(['systemctl', 'show', 'ai-core.slice',
-                            '-p', 'ControlGroup', '--value'],
-                           capture_output=True, text=True, timeout=8)
-        group = r.stdout.strip()
-        if r.returncode or not group.startswith('/') or '..' in Path(group).parts:
-            raise AdmissionError(503, 'HANDOFF_CGROUP_UNAVAILABLE')
         try:
-            current = int((Path('/sys/fs/cgroup') / group.lstrip('/')
-                           / 'memory.current').read_text().strip())
+            current = int((parent_cgroup_folder() / 'memory.current')
+                          .read_text().strip())
         except (OSError, ValueError) as error:
             raise AdmissionError(503, 'HANDOFF_MEMORY_CURRENT_UNAVAILABLE') from error
         # A newly started backend can use its entire allowed container
