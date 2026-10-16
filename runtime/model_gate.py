@@ -324,9 +324,19 @@ class Coordinator:
                 self.orphan_idle_samples[model] = (
                     self.orphan_idle_samples.get(model, 0) + 1 if idle else 0)
                 if not running or self.orphan_idle_samples[model] >= 2:
-                    self.orphaned.discard(model)
-                    self.orphan_idle_samples.pop(model, None)
-                    self._persist_leases()
+                    # Never release an orphan reservation in memory before
+                    # its durable journal update succeeds. A failed fsync or
+                    # rename must leave global capacity protected.
+                    old_samples = self.orphan_idle_samples.pop(model, None)
+                    self.orphaned.remove(model)
+                    try:
+                        self._persist_leases()
+                    except BaseException:
+                        self.orphaned.add(model)
+                        if old_samples is not None:
+                            self.orphan_idle_samples[model] = old_samples
+                        raise
+                    self.wait_condition.notify_all()
 
     def running(self):
         return {name for name,spec in self.specs.items() if self.driver.running(spec)}
