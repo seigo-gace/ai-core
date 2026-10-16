@@ -336,7 +336,10 @@ class Coordinator:
         with self.lock:
             loaded = self.running()
             if len(loaded) > self.max_loaded:
-                raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
+                if self.lease_journal is None or len(loaded) > 3:
+                    raise AdmissionError(409, 'EXISTING_RESIDENCY_EXCEEDS_POLICY')
+                self.orphaned.update(loaded)
+                self._persist_leases()
             # Inherited ready residents must enter the same idle TTL policy
             # as models first loaded by this coordinator.
             started = self.clock()
@@ -758,13 +761,19 @@ class Coordinator:
                     return
                 loaded = self.running()
                 choice = None
-                for model in loaded:
-                    if self.active[model] or model in self.orphaned:
-                        continue
-                    last = self.used[model]
-                    if last is not None and self.clock() - last >= self.idle_seconds:
-                        choice = ('stop', model)
-                        break
+                if len(loaded) > self.max_loaded:
+                    available = [m for m in loaded if not self.active[m] and m not in self.orphaned]
+                    if available:
+                        victim = min(available, key=lambda m:(self.specs[m]['warm'], self.used[m] or 0,m))
+                        choice = ('stop', victim)
+                else:
+                    for model in loaded:
+                        if self.active[model] or model in self.orphaned:
+                            continue
+                        last = self.used[model]
+                        if last is not None and self.clock() - last >= self.idle_seconds:
+                            choice = ('stop', model)
+                            break
                 if choice is None:
                     return
                 action, model = choice
