@@ -12,11 +12,12 @@ class PrivateTransportPolicyTests(unittest.TestCase):
     def test_socket_mode_requires_no_published_tcp(self):
         cfg = yaml.safe_load((ROOT / 'compose.runtime.yml').read_text())
         model = 'coder'
+        for name, candidate in cfg['services'].items():
+            args = candidate['command']
+            args[args.index('--host') + 1] = '/run/ai-core-backend/' + name + '.sock'
+            candidate['ports'] = []
+            candidate['volumes'].append('ai-core-backend-bus:/run/ai-core-backend')
         svc = cfg['services'][model]
-        args = svc['command']
-        args[args.index('--host') + 1] = '/run/ai-core-backend/coder.sock'
-        svc['ports'] = []
-        svc['volumes'].append('ai-core-backend-bus:/run/ai-core-backend')
         with tempfile.TemporaryDirectory() as tmp:
             file = Path(tmp) / 'compose.yaml'
             file.write_text(yaml.safe_dump(cfg))
@@ -24,6 +25,15 @@ class PrivateTransportPolicyTests(unittest.TestCase):
                 file, load_policy(ROOT / 'runtime/model-policy.yaml'))
             self.assertEqual(specs[model]['backend_socket'],
                              '/run/ai-core-backend/coder.sock')
+            svc['command'][svc['command'].index('--host') + 1] = '0.0.0.0'
+            svc['ports'] = ['127.0.0.1:18084:8080']
+            file.write_text(yaml.safe_dump(cfg))
+            with self.assertRaisesRegex(ValueError, 'MIXED_BACKEND_TRANSPORT'):
+                model_specs_from_compose(
+                    file, load_policy(ROOT / 'runtime/model-policy.yaml'))
+            svc['command'][svc['command'].index('--host') + 1] = (
+                '/run/ai-core-backend/coder.sock')
+            svc['ports'] = []
             svc['ports'] = ['127.0.0.1:18084:8080']
             file.write_text(yaml.safe_dump(cfg))
             with self.assertRaisesRegex(ValueError, 'BACKEND_UNIX_TCP_PUBLISHED'):
