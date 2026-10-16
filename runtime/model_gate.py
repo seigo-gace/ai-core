@@ -247,7 +247,7 @@ class ExistingContainerDriver:
             raise AdmissionError(409, 'BACKEND_CPU_LIMIT_MISMATCH')
         ports = (hc.get('PortBindings') or {}).get('8080/tcp') or []
         if spec.get('backend_socket'):
-            if ports:
+            if any(value for value in (hc.get('PortBindings') or {}).values()):
                 raise AdmissionError(409, 'BACKEND_UNIX_TCP_EXPOSED')
             mounts = container.get('Mounts') or []
             if not any(isinstance(mount, dict) and
@@ -1334,6 +1334,9 @@ def make_handler(coordinator, model, api_key):
 def run_servers(coordinator, token, state_dir):
     if not token:
         raise ValueError('EXISTING_API_KEY_REQUIRED')
+    if any(spec.get('backend_socket') for spec in coordinator.specs.values()):
+        if not os.path.ismount(BACKEND_UNIX_DIRECTORY):
+            raise AdmissionError(503, 'BACKEND_UNIX_GATE_VOLUME_NOT_MOUNTED')
     folder = Path(state_dir)
     folder.mkdir(mode=0o700,parents=True,exist_ok=True)
     lockfile = folder/'per-model-gate.lock'
