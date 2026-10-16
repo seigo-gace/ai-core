@@ -17,6 +17,7 @@ import math
 import os
 import re
 import secrets
+import socket
 from pathlib import Path
 import signal
 import subprocess
@@ -30,6 +31,32 @@ import yaml
 DEFAULT_POLICY = Path(__file__).with_name('model-policy.yaml')
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+BACKEND_UNIX_DIRECTORY = '/run/ai-core-backend'
+
+
+class UnixBackendConnection(http.client.HTTPConnection):
+    """Retain llama-server HTTP semantics over a local Unix socket."""
+    def __init__(self, path, *, timeout=3):
+        super().__init__('localhost', timeout=timeout)
+        self.unix_path = path
+
+    def connect(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            connection.settimeout(self.timeout)
+            connection.connect(self.unix_path)
+        except BaseException:
+            connection.close()
+            raise
+        self.sock = connection
+
+
+def backend_http_connection(spec, *, timeout=3, upstream=False):
+    """Use one backend transport for health, slots, and inference."""
+    if spec.get('backend_socket'):
+        return UnixBackendConnection(spec['backend_socket'], timeout=timeout)
+    conn_type = UpstreamConnection if upstream else http.client.HTTPConnection
+    return conn_type('127.0.0.1', spec['backend_port'], timeout=timeout)
 
 
 class AdmissionError(Exception):
@@ -89,11 +116,25 @@ def model_specs_from_compose(path, policy):
         if idx + 1 >= len(cmd) or not str(cmd[idx + 1]).startswith('/models/'):
             raise ValueError('INVALID_MODEL_ID:' + model)
         ports = svc.get('ports') or []
-        if len(ports) != 1:
-            raise ValueError('INVALID_BACKEND_PORT:' + model)
-        parts = str(ports[0]).split(':')
-        if len(parts) != 3 or parts[0] != '127.0.0.1' or not parts[1].isdigit():
-            raise ValueError('BACKEND_NOT_LOOPBACK:' + model)
+        listen = None
+        if '--host' in cmd and cmd.index('--host') + 1 < len(cmd):
+            listen = cmd[cmd.index('--host') + 1]
+        expected_socket = BACKEND_UNIX_DIRECTORY + '/' + model + '.sock'
+        unix = listen == expected_socket
+        if isinstance(listen, str) and listen.endswith('.sock') and not unix:
+            raise ValueError('INVALID_BACKEND_UNIX_PATH:' + model)
+        if unix:
+            if ports:
+                raise ValueError('BACKEND_UNIX_TCP_PUBLISHED:' + model)
+            mounts = svc.get('volumes') or []
+            if 'ai-core-backend-bus:' + BACKEND_UNIX_DIRECTORY not in mounts:
+                raise ValueError('BACKEND_UNIX_VOLUME_MISSING:' + model)
+        else:
+            if len(ports) != 1:
+                raise ValueError('INVALID_BACKEND_PORT:' + model)
+            parts = str(ports[0]).split(':')
+            if len(parts) != 3 or parts[0] != '127.0.0.1' or not parts[1].isdigit():
+                raise ValueError('BACKEND_NOT_LOOPBACK:' + model)
         memory = str(svc.get('mem_limit') or '')
         limit_bytes = parse_bytes(memory)
         try:
@@ -104,11 +145,16 @@ def model_specs_from_compose(path, policy):
             raise ValueError('INVALID_CPU_LIMIT:' + model)
         if '--cache-ram' not in cmd:
             raise ValueError('PROMPT_CACHE_CONTRACT_MISSING:' + model)
-        specs[model] = {'model_id':cmd[idx+1], 'backend_port':int(parts[1]),
-                        'gate_port':item['gate_port'], 'service':model,
-                        'memory_limit_bytes':limit_bytes, 'cpu_limit':cpus,
-                        'warm':item['warm']}
-    if len({v['backend_port'] for v in specs.values()}) != len(specs):
+        specs[model] = {'model_id':cmd[idx+1], 'gate_port':item['gate_port'],
+                        'service':model, 'memory_limit_bytes':limit_bytes,
+                        'cpu_limit':cpus, 'warm':item['warm']}
+        if unix:
+            specs[model]['backend_socket'] = expected_socket
+        else:
+            specs[model]['backend_port'] = int(parts[1])
+    tcp_ports = [v['backend_port'] for v in specs.values()
+                 if 'backend_port' in v]
+    if len(set(tcp_ports)) != len(tcp_ports):
         raise ValueError('DUPLICATE_BACKEND_PORT')
     return specs
 
@@ -198,7 +244,17 @@ class ExistingContainerDriver:
         if int(hc.get('NanoCpus') or 0) != round(spec['cpu_limit']*1_000_000_000):
             raise AdmissionError(409, 'BACKEND_CPU_LIMIT_MISMATCH')
         ports = (hc.get('PortBindings') or {}).get('8080/tcp') or []
-        if (len(ports) != 1 or ports[0].get('HostIp') != '127.0.0.1'
+        if spec.get('backend_socket'):
+            if ports:
+                raise AdmissionError(409, 'BACKEND_UNIX_TCP_EXPOSED')
+            mounts = container.get('Mounts') or []
+            if not any(isinstance(mount, dict) and
+                       mount.get('Type') == 'volume' and
+                       mount.get('Name') == 'ai-core-backend-bus' and
+                       mount.get('Destination') == BACKEND_UNIX_DIRECTORY
+                       for mount in mounts):
+                raise AdmissionError(409, 'BACKEND_UNIX_VOLUME_NOT_SHARED')
+        elif (len(ports) != 1 or ports[0].get('HostIp') != '127.0.0.1'
                 or str(ports[0].get('HostPort')) != str(spec['backend_port'])):
             raise AdmissionError(409, 'BACKEND_LOOPBACK_PORT_MISMATCH')
         cmd = (container.get('Config') or {}).get('Cmd') or []
@@ -221,8 +277,7 @@ class ExistingContainerDriver:
         safe. /slots is a safety observation, not a substitute for network
         isolation or exclusive traffic ownership.
         """
-        connection = http.client.HTTPConnection('127.0.0.1',
-                                                spec['backend_port'], timeout=3)
+        connection = backend_http_connection(spec, timeout=3)
         try:
             connection.request('GET', '/slots')
             response = connection.getresponse()
@@ -251,7 +306,7 @@ class ExistingContainerDriver:
 
     def healthy(self, spec):
         try:
-            conn = http.client.HTTPConnection('127.0.0.1',spec['backend_port'],timeout=3)
+            conn = backend_http_connection(spec, timeout=3)
             conn.request('GET','/health')
             response = conn.getresponse()
             response.read(4096)
@@ -400,8 +455,7 @@ class Coordinator:
     def _backend_slots_idle(self, model):
         spec = self.specs[model]
         try:
-            connection = http.client.HTTPConnection('127.0.0.1',
-                                                    spec['backend_port'], timeout=3)
+            connection = backend_http_connection(spec, timeout=3)
             try:
                 connection.request('GET', '/slots')
                 response = connection.getresponse()
@@ -1136,7 +1190,7 @@ def make_handler(coordinator, model, api_key):
                     raise AdmissionError(422, 'INVALID_WAIT_DEADLINE')
                 client = self.headers.get('X-AI-Core-Client', 'default')
                 with coordinator.lease(model, wait_seconds=wait_ms / 1000, client=client) as spec:
-                    conn = UpstreamConnection('127.0.0.1',spec['backend_port'],timeout=600)
+                    conn = backend_http_connection(spec, timeout=600, upstream=True)
                     try:
                         conn.request('POST','/v1/chat/completions',body=body,
                                      headers={'Content-Type':'application/json'})
