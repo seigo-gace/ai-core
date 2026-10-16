@@ -116,6 +116,10 @@ def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
                          control_group=None):
     """Read current parent cgroup ceilings; never overwrite approved limits."""
     if control_group is None:
+        # A Dockerized Gate reads the existing Host cgroup read-only instead
+        # of requiring systemd inside its isolated container.
+        control_group = os.environ.get('AI_CORE_PARENT_CONTROL_GROUP') or None
+    if control_group is None:
         r = subprocess.run(['systemctl','show','ai-core.slice','-p',
                             'ControlGroup','--value'], capture_output=True,
                            text=True, timeout=8, check=False)
