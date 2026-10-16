@@ -13,6 +13,7 @@ import http.client
 from http.client import HTTPException as UpstreamHTTPException
 from http.client import HTTPConnection as UpstreamConnection
 import json
+import math
 import os
 import re
 import secrets
@@ -251,6 +252,7 @@ class Coordinator:
         self.handoff = None  # bounded, single temporary third-model slot
         self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
         self.lease_journal = None
+        self.handoff_journal = None
         self.orphaned = set()
         self.orphan_idle_samples = {}
 
@@ -271,6 +273,78 @@ class Coordinator:
         except OSError as error:
             raise AdmissionError(503, 'LEASE_JOURNAL_WRITE_FAILED') from error
 
+    def _persist_handoff(self):
+        """Persist an owner-bound transaction before making a Docker change."""
+        if self.handoff_journal is None:
+            return
+        state = self.handoff
+        record = None
+        if state is not None:
+            record = {key: state[key] for key in
+                      ('from', 'to', 'owner', 'ticket', 'started_target')}
+            record['final_action'] = state.get('final_action')
+            record['pending'] = state['expires'] is None
+            record['deadline_wall'] = (
+                time.time() + max(0, state['expires'] - self.clock())
+                if state['expires'] is not None else None)
+        payload = json.dumps({'schema': 1, 'handoff': record}, sort_keys=True)
+        target = self.handoff_journal.with_suffix('.tmp')
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(target, self.handoff_journal)
+            fd = os.open(self.handoff_journal.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as error:
+            raise AdmissionError(503, 'HANDOFF_JOURNAL_WRITE_FAILED') from error
+
+    def _load_handoff(self, folder):
+        path = Path(folder) / 'handoff-state.json'
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding='utf-8'))
+                if not isinstance(payload, dict) or payload.get('schema') != 1:
+                    raise ValueError('INVALID_HANDOFF_SCHEMA')
+                state = payload['handoff']
+                if state is not None:
+                    if (not isinstance(state, dict) or
+                            set(state) != {'from', 'to', 'owner', 'ticket',
+                                           'started_target', 'final_action',
+                                           'pending', 'deadline_wall'} or
+                            state['from'] not in self.specs or
+                            state['to'] not in self.specs or
+                            state['from'] == state['to'] or
+                            not isinstance(state['owner'], str) or
+                            not state['owner'] or len(state['owner']) > 128 or
+                            not isinstance(state['ticket'], str) or
+                            len(state['ticket']) < 32 or
+                            type(state['started_target']) is not bool or
+                            type(state['pending']) is not bool or
+                            state['final_action'] not in (None, 'complete', 'abort') or
+                            (state['deadline_wall'] is not None and
+                             (type(state['deadline_wall']) not in (int, float) or
+                              not math.isfinite(state['deadline_wall']))) or
+                            (not state['pending'] and state['deadline_wall'] is None)):
+                        raise ValueError('INVALID_HANDOFF_RECORD')
+                    pending = state.pop('pending')
+                    wall = state.pop('deadline_wall')
+                    # A restart during a cold handoff load cannot assume that
+                    # readiness succeeded; force an abort after orphan recovery.
+                    state['expires'] = (self.clock() if pending else
+                        self.clock() + max(0, wall - time.time()))
+                    if pending:
+                        state['final_action'] = 'abort'
+                    self.handoff = state
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                raise AdmissionError(503, 'HANDOFF_JOURNAL_CORRUPT') from error
+        self.handoff_journal = path
+
     def configure_recovery(self, folder):
         """Journal leases in the existing Gate volume; fail closed on corruption."""
         with self.lock:
@@ -287,6 +361,7 @@ class Coordinator:
                 except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
                     raise AdmissionError(503, 'LEASE_JOURNAL_CORRUPT') from error
                 self.orphaned = {m for m, count in counts.items() if count > 0}
+            self._load_handoff(folder)
             self.lease_journal = path
             self._persist_leases()
 
@@ -667,7 +742,14 @@ class Coordinator:
             self.handoff = {'from': previous, 'to': target, 'owner': owner,
                             'ticket': secrets.token_urlsafe(32),
                             'expires': None, 'ready_ttl': ttl,
-                             'started_target': needs_start}
+                             'started_target': needs_start,
+                             'final_action': None}
+            # Reserve durably before any third-model physical startup.
+            try:
+                self._persist_handoff()
+            except BaseException:
+                self.handoff = None
+                raise
             if needs_start:
                 self.transitioning.add(target)
         try:
@@ -687,6 +769,7 @@ class Coordinator:
                 if len(self.running()) > 3:
                     raise AdmissionError(503, 'HANDOFF_CAPACITY_EXCEEDED')
                 self.handoff['expires'] = self.clock() + self.handoff.pop('ready_ttl')
+                self._persist_handoff()
                 return dict(self.handoff)
         except BaseException:
             # A failed start can already have made the target resident.
@@ -701,11 +784,19 @@ class Coordinator:
                 pass
             with self.lock:
                 if cleanup_ok:
+                    old = self.handoff
                     self.handoff = None
+                    try:
+                        self._persist_handoff()
+                    except BaseException:
+                        self.handoff = old
+                        raise
                 else:
-                    # Keep the admission block; the expiry reaper retries
-                    # cleanup without touching either original resident.
+                    # Retain the abort intent until the third-model stop
+                    # succeeds, even when the Gate process restarts.
                     self.handoff['expires'] = self.clock()
+                    self.handoff['final_action'] = 'abort'
+                    self._persist_handoff()
             if not cleanup_ok:
                 raise AdmissionError(503, 'HANDOFF_ROLLBACK_PENDING')
             raise
@@ -726,6 +817,9 @@ class Coordinator:
                 raise AdmissionError(429, 'HANDOFF_NOT_READY')
             if self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
+            action = 'complete' if completed else 'abort'
+            if state.get('final_action') not in (None, action):
+                raise AdmissionError(409, 'HANDOFF_OUTCOME_ALREADY_COMMITTED')
             victim = state['from'] if completed else (state['to'] if state.get('started_target') else None)
             if completed and victim not in self.running():
                 # The source model can be nonresident in a general handoff.
@@ -740,12 +834,27 @@ class Coordinator:
                                  key=lambda m:(self.specs[m]['warm'],
                                                self.used[m] or 0, m))
             if victim is None:
+                old = self.handoff
                 self.handoff = None
+                try:
+                    self._persist_handoff()
+                except BaseException:
+                    self.handoff = old
+                    raise
                 return
             if self.active[victim]:
                 raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
             if victim in self.orphaned:
                 raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
+            # A crash after the stop must not reverse completion into an
+            # expiry-abort which would evict the new target model.
+            old_action = state.get('final_action')
+            state['final_action'] = action
+            try:
+                self._persist_handoff()
+            except BaseException:
+                state['final_action'] = old_action
+                raise
             self.transitioning.add(victim)
         try:
             # Recovery is idempotent: a previous stop may have succeeded even
@@ -755,7 +864,13 @@ class Coordinator:
             if self.driver.running(self.specs[victim]):
                 raise AdmissionError(503, 'HANDOFF_STOP_NOT_CONFIRMED')
             with self.lock:
+                old = self.handoff
                 self.handoff = None
+                try:
+                    self._persist_handoff()
+                except BaseException:
+                    self.handoff = old
+                    raise
         finally:
             with self.lock:
                 self.transitioning.discard(victim)
@@ -766,7 +881,8 @@ class Coordinator:
             if state is None or state['expires'] is None or self.clock() < state['expires']:
                 return False
             owner = state['owner']
-        self.handoff_finish(owner, completed=False)
+        # Preserve a previously committed completion across a Gate crash.
+        self.handoff_finish(owner, completed=state.get('final_action') == 'complete')
         return True
 
     def reap(self):
