@@ -400,6 +400,12 @@ class Coordinator:
                 raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
             if self.active[model]:
                 raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
+            # After Gate restart, an orphaned backend may still be executing
+            # a detached inference. Its unknown lease reserves one GLOBAL
+            # inference slot until /slots proves that model idle. The local
+            # semaphore alone only knows leases acquired by this process.
+            if sum(self.active.values()) + len(self.orphaned) >= self.max_active:
+                raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
             if model in self.transitioning:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
             if self.driver.running(spec):
