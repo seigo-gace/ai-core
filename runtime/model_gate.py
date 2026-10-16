@@ -574,10 +574,21 @@ class Coordinator:
             return None
         available = [ticket for ticket in self.waiters
                      if ticket not in self.waiter_inflight]
+        # Rotate over DISTINCT active callers, not merely "different from the
+        # last caller". The latter alternates A/B forever while C waits
+        # behind a long backlog, violating the no-starvation requirement.
+        first_ticket = {}
+        order = []
         for ticket in available:
-            if self.waiter_clients.get(ticket, 'default') != self.last_served_client:
-                return ticket
-        return available[0] if available else None
+            client = self.waiter_clients.get(ticket, 'default')
+            if client not in first_ticket:
+                first_ticket[client] = ticket
+                order.append(client)
+        if not order:
+            return None
+        turn = (order.index(self.last_served_client) + 1
+                if self.last_served_client in first_ticket else 0)
+        return first_ticket[order[turn % len(order)]]
 
     def acquire_wait(self, model, wait_seconds=0, client='default'):
         # Explicit opt-in, bounded FIFO within each client; no active slot is reserved while
