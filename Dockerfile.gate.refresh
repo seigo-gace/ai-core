@@ -1,0 +1,8 @@
+# Refresh the admitted Gate image using only the AI Core runtime/ context.
+# Pass --build-arg GATE_BASE_IMAGE=<verified-existing-local-image>.
+# The parent already contains pinned Python dependencies and Docker CLI.
+# No APT, network, credentials, model weights or host .env enter this build.
+ARG GATE_BASE_IMAGE
+FROM ${GATE_BASE_IMAGE}
+WORKDIR /app
+COPY . /app/runtime/
