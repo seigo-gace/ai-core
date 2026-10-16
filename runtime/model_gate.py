@@ -250,6 +250,83 @@ class Coordinator:
         self.last_served_client = None
         self.handoff = None  # bounded, single temporary third-model slot
         self.handoff_budget_check = handoff_budget_check or self._verify_handoff_budget
+        self.lease_journal = None
+        self.orphaned = set()
+        self.orphan_idle_samples = {}
+
+    def _persist_leases(self):
+        if self.lease_journal is None:
+            return
+        counts = {m: self.active[m] + int(m in self.orphaned)
+                  for m in self.specs}
+        data = json.dumps({'schema': 1, 'active': counts}, sort_keys=True)
+        target = self.lease_journal.with_suffix('.tmp')
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(target, self.lease_journal)
+        except OSError as error:
+            raise AdmissionError(503, 'LEASE_JOURNAL_WRITE_FAILED') from error
+
+    def configure_recovery(self, folder):
+        """Journal leases in the existing Gate volume; fail closed on corruption."""
+        with self.lock:
+            path = Path(folder) / 'active-leases.json'
+            if path.is_file():
+                try:
+                    content = json.loads(path.read_text(encoding='utf-8'))
+                    counts = content['active']
+                    if (content.get('schema') != 1 or
+                            set(counts) != set(self.specs) or
+                            any(type(v) is not int or v < 0
+                                for v in counts.values())):
+                        raise ValueError('INVALID_JOURNAL')
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                    raise AdmissionError(503, 'LEASE_JOURNAL_CORRUPT') from error
+                self.orphaned = {m for m, count in counts.items() if count > 0}
+            self.lease_journal = path
+            self._persist_leases()
+
+    def _backend_slots_idle(self, model):
+        spec = self.specs[model]
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1',
+                                                    spec['backend_port'], timeout=3)
+            try:
+                connection.request('GET', '/slots')
+                response = connection.getresponse()
+                if response.status != 200:
+                    return False
+                records = json.loads(response.read(65536).decode('utf-8'))
+                return (isinstance(records, list) and len(records) > 0 and
+                        all(isinstance(slot, dict) and
+                            type(slot.get('is_processing')) is bool and
+                            not slot['is_processing'] for slot in records))
+            finally:
+                connection.close()
+        except (OSError, ValueError, TypeError, TimeoutError):
+            return False
+
+    def recover_orphans(self):
+        # Do not infer idle status from /health. Require two independent
+        # /slots observations; lack of a supported slots API fails closed.
+        with self.lock:
+            candidates = list(self.orphaned)
+        for model in candidates:
+            running = self.driver.running(self.specs[model])
+            idle = not running or self._backend_slots_idle(model)
+            with self.lock:
+                if model not in self.orphaned:
+                    continue
+                self.orphan_idle_samples[model] = (
+                    self.orphan_idle_samples.get(model, 0) + 1 if idle else 0)
+                if not running or self.orphan_idle_samples[model] >= 2:
+                    self.orphaned.discard(model)
+                    self.orphan_idle_samples.pop(model, None)
+                    self._persist_leases()
 
     def running(self):
         return {name for name,spec in self.specs.items() if self.driver.running(spec)}
@@ -276,7 +353,7 @@ class Coordinator:
         if target in loaded:
             return evicted
         while len(loaded) >= self.max_loaded:
-            idle = [m for m in loaded if self.active[m] == 0 and m != target]
+            idle = [m for m in loaded if self.active[m] == 0 and m != target and m not in self.orphaned]
             if not idle:
                 raise AdmissionError(429, 'ALL_RESIDENT_MODELS_LEASED')
             victim = min(idle,key=lambda m:(self.specs[m]['warm'],self.used[m] or 0,m))
@@ -316,6 +393,8 @@ class Coordinator:
         previous = None
         semaphore_acquired = False
         with self.lock:
+            if model in self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
             if self.active[model]:
                 raise AdmissionError(429, 'MODEL_CONCURRENCY_LIMIT')
             if model in self.transitioning:
@@ -325,6 +404,12 @@ class Coordinator:
                     raise AdmissionError(429, 'GLOBAL_CONCURRENCY_LIMIT')
                 self.active[model] += 1
                 self.used[model] = self.clock()
+                try:
+                    self._persist_leases()
+                except AdmissionError:
+                    self.active[model] -= 1
+                    self.semaphore.release()
+                    raise
                 return model
             if self.transitioning or self.handoff is not None:
                 raise AdmissionError(429, 'MODEL_TRANSITION_BUSY')
@@ -353,6 +438,11 @@ class Coordinator:
                 semaphore_acquired = True
                 self.active[model] += 1
                 self.used[model] = self.clock()
+                try:
+                    self._persist_leases()
+                except AdmissionError:
+                    self.active[model] -= 1
+                    raise
             return model
         except BaseException:
             if semaphore_acquired:
@@ -376,8 +466,11 @@ class Coordinator:
                 raise RuntimeError('DOUBLE_RELEASE')
             self.active[model] -= 1
             self.used[model] = self.clock()
-            self.semaphore.release()
-            self.wait_condition.notify_all()
+            try:
+                self._persist_leases()
+            finally:
+                self.semaphore.release()
+                self.wait_condition.notify_all()
 
     def _next_waiter(self):
         # Preserve arrival order within a client while preventing a single
@@ -536,6 +629,8 @@ class Coordinator:
         with self.lock:
             if self.handoff or self.transitioning:
                 raise AdmissionError(429, 'HANDOFF_IN_PROGRESS')
+            if previous in self.orphaned or target in self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
             loaded = self.running()
             if len(loaded) > self.max_loaded:
                 raise AdmissionError(409, 'HANDOFF_RESIDENCY_NOT_READY')
@@ -624,6 +719,8 @@ class Coordinator:
                 return
             if self.active[victim]:
                 raise AdmissionError(429, 'HANDOFF_MODEL_LEASED')
+            if victim in self.orphaned:
+                raise AdmissionError(503, 'ORPHANED_LEASE_RECOVERY_PENDING')
             self.transitioning.add(victim)
         try:
             # Recovery is idempotent: a previous stop may have succeeded even
@@ -654,6 +751,7 @@ class Coordinator:
         runs outside it. Acquiring the transitioning model fails closed; an
         already-ready model may still acquire a lease concurrently.
         """
+        self.recover_orphans()
         for _ in range(2 * len(self.specs)):
             with self.lock:
                 if self.transitioning or self.handoff:
@@ -661,7 +759,7 @@ class Coordinator:
                 loaded = self.running()
                 choice = None
                 for model in loaded:
-                    if self.active[model]:
+                    if self.active[model] or model in self.orphaned:
                         continue
                     last = self.used[model]
                     if last is not None and self.clock() - last >= self.idle_seconds:
@@ -985,6 +1083,7 @@ def run_servers(coordinator, token, state_dir):
             fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise AdmissionError(409,'GATE_ALREADY_RUNNING') from error
+        coordinator.configure_recovery(folder)
         coordinator.preflight()
         servers = []
         try:
