@@ -1497,6 +1497,53 @@ class GateHttpTests(unittest.TestCase):
         self.assertEqual(data['error']['code'],'UPSTREAM_UNAVAILABLE')
         self.assertEqual(self.coord.active['coder'],0)
 
+    def test_opt_in_18080_compatibility_uses_same_coordinator(self):
+        # Historical OpenAI callers see all models on one legacy port.
+        # The optional listener still uses the same shared lease/admission.
+        self.coord.specs['granite']['backend_port'] = self.backend.server_address[1]
+        compat = ThreadingHTTPServer(
+            ('127.0.0.1', 0),
+            make_handler(self.coord, '__compat_18080__',
+                         'EXISTING_TEST_KEY_12345'))
+        worker = threading.Thread(target=compat.serve_forever, daemon=True)
+        worker.start()
+        original_base = self.base
+        self.base = 'http://127.0.0.1:' + str(compat.server_address[1])
+        try:
+            status, _ = self.req('/v1/models', auth=False)
+            self.assertEqual(status, 401)
+            status, catalog = self.req('/v1/models')
+            self.assertEqual(status, 200)
+            self.assertEqual({row['id'] for row in catalog['data']},
+                             {'/models/'+name+'.gguf' for name in self.coord.specs})
+            status, data = self.req('/internal/handoff/begin',
+                                    {'owner': 'x', 'target': 'qwen3'})
+            self.assertEqual(status, 404)
+            self.assertEqual(data['error']['code'], 'NOT_FOUND')
+            status, data = self.req('/v1/chat/completions',
+                                    {'model': 'unknown',
+                                     'messages': [{'role': 'user', 'content': 'ping'}]})
+            self.assertEqual(status, 422)
+            self.assertEqual(data['error']['code'], 'WRONG_MODEL_FOR_ENDPOINT')
+            for chosen, expected_id in [('granite', '/models/granite.gguf'),
+                                        ('/models/coder.gguf', '/models/coder.gguf')]:
+                status, data = self.req('/v1/chat/completions',
+                                        {'model': chosen,
+                                         'messages': [{'role': 'user', 'content': 'ping'}]})
+                self.assertEqual(status, 200)
+                self.assertEqual(data['choices'][0]['message']['content'], expected_id)
+            import time
+            until = time.monotonic()+1
+            while any(self.coord.active.values()) and time.monotonic()<until:
+                time.sleep(0.005)
+            self.assertTrue(all(v==0 for v in self.coord.active.values()))
+            self.assertLessEqual(len(self.driver.loaded), 2)
+        finally:
+            self.base = original_base
+            compat.shutdown()
+            compat.server_close()
+            worker.join(timeout=1)
+
     def test_four_existing_model_apis_share_one_coordinator(self):
         # Four model-local gates, not four independent resource managers.
         # Reuse the same mocked backend while verifying model IDs,
