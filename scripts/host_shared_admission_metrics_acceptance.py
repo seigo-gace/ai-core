@@ -40,7 +40,7 @@ def run_one(client, model, stream):
     payload = {
         "model": model,
         "temperature": 0,
-        "max_tokens": 24,
+        "max_tokens": 128,
         "stream": stream,
         "messages": [{"role": "user", "content":
             "Reply with the result of two plus two as one number."}],
@@ -79,7 +79,19 @@ def run_one(client, model, stream):
             return {"ok": ok, "client": client, "stream": stream,
                     "elapsed_ms": int((time.monotonic()-started)*1000),
                     "tokens": tokens}
-    except (OSError, ValueError, urllib.error.HTTPError) as exc:
+    except urllib.error.HTTPError as exc:
+        code = None
+        try:
+            payload = json.loads(exc.read(2048))
+            field = payload.get("error", {}).get("code")
+            if isinstance(field, str) and len(field) <= 48 and all(
+                    c.isupper() or c.isdigit() or c == "_" for c in field):
+                code = field
+        except (ValueError, TypeError):
+            pass
+        return {"ok": False, "client": client, "stream": stream,
+                "http": exc.code, "error_code": code}
+    except (OSError, ValueError) as exc:
         return {"ok": False, "client": client, "stream": stream,
                 "error_type": type(exc).__name__}
 
@@ -89,6 +101,13 @@ def main():
         models = json.load(r)["data"]
     if len(models) != 1:
         raise RuntimeError("MODEL_CATALOGUE_CHANGED")
+    with query(METRICS_ROOT, "/internal/handoff/status", timeout=10) as r:
+        state = json.load(r)
+    warmed = None
+    if "granite" not in state["resident"]:
+        # A bounded 30s wait cannot outlast a 35s cold model load.
+        # Prepare a ready model once, then test actual concurrent leases.
+        warmed = run_one("core-acceptance-prewarm", models[0]["id"], False)
     before = snapshot()
     if before["persistence"] != "READY":
         raise RuntimeError("METRICS_PERSISTENCE_UNAVAILABLE")
@@ -109,6 +128,7 @@ def main():
         "acceptance": "AI_CORE_ACTUAL_SHARED_ADMISSION_WITH_METRICS",
         "result": "PASS" if passed else "FAIL",
         "clients": len(results),
+        "prewarmed": warmed,
         "responses": results,
         "elapsed_ms": int((time.monotonic()-t)*1000),
         "samples_before": before["window_completed"],
