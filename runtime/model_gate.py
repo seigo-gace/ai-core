@@ -213,8 +213,40 @@ class ExistingContainerDriver:
         if not self.running(spec):
             self._run('start', 'ai-'+spec['service'])
 
+    def _backend_slots_idle(self, spec):
+        """Independently refuse eviction while llama.cpp is processing.
+
+        An unregistered direct-backend caller does not own a Coordinator
+        lease. Zero known leases alone can never prove that Docker stop is
+        safe. /slots is a safety observation, not a substitute for network
+        isolation or exclusive traffic ownership.
+        """
+        connection = http.client.HTTPConnection('127.0.0.1',
+                                                spec['backend_port'], timeout=3)
+        try:
+            connection.request('GET', '/slots')
+            response = connection.getresponse()
+            if response.status != 200:
+                return False
+            slots = json.loads(response.read(65536).decode('utf-8'))
+            return (isinstance(slots, list) and bool(slots)
+                    and all(isinstance(slot, dict)
+                            and type(slot.get('is_processing')) is bool
+                            and not slot['is_processing']
+                            for slot in slots))
+        except (OSError, ValueError, TypeError, TimeoutError,
+                UpstreamHTTPException):
+            return False
+        finally:
+            connection.close()
+
     def stop(self, spec):
         if self.running(spec):
+            # Fail closed if direct bypass traffic is still processing or
+            # backend slots cannot be verified. A subsequent reaper pass may
+            # retry after legitimate work has finished.
+            if not self._backend_slots_idle(spec):
+                raise AdmissionError(409, 'BACKEND_SLOTS_BUSY_OR_UNVERIFIED')
             self._run('stop', '--time', '30', 'ai-'+spec['service'])
 
     def healthy(self, spec):
