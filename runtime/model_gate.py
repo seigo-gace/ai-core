@@ -740,6 +740,40 @@ def make_handler(coordinator, model, api_key):
                           'active': active, 'handoff': summary}
                 self._send(200, result)
                 return
+            if self.path == '/internal/resources/status':
+                # Authenticated, read-only physical resource accounting. Do
+                # not infer available memory from configured model ceilings.
+                try:
+                    root = parent_cgroup_folder()
+                    memory = {name: (root / name).read_text().strip()
+                              for name in ('memory.current','memory.high',
+                                           'memory.max','memory.swap.current')}
+                    cpu_max = (root / 'cpu.max').read_text().strip()
+                    cpu_stat = {}
+                    for line in (root / 'cpu.stat').read_text().splitlines():
+                        fields = line.split()
+                        if len(fields) == 2:
+                            cpu_stat[fields[0]] = int(fields[1])
+                    memory_events = {}
+                    for line in (root / 'memory.events').read_text().splitlines():
+                        fields = line.split()
+                        if len(fields) == 2:
+                            memory_events[fields[0]] = int(fields[1])
+                    with coordinator.lock:
+                        active = dict(coordinator.active)
+                        queued = len(coordinator.waiters)
+                        inflight = len(coordinator.waiter_inflight)
+                        transitioning = sorted(coordinator.transitioning)
+                    data = {'memory': memory, 'cpu_max': cpu_max,
+                            'cpu_stat': cpu_stat, 'memory_events': memory_events,
+                            'active': active, 'queued': queued,
+                            'admission_inflight': inflight,
+                            'transitioning': transitioning}
+                except (OSError, ValueError, TypeError):
+                    self._send(503, {'error': {'code': 'RESOURCE_READBACK_UNAVAILABLE'}})
+                    return
+                self._send(200, data)
+                return
             if self.path == '/v1/models':
                 mid = coordinator.specs[model]['model_id']
                 self._send(200,{'object':'list','data':[{'id':mid,'object':'model'}]})
