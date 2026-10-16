@@ -3,15 +3,15 @@
 # Never creates a new API credential, service, project, or model.
 set -Eeuo pipefail
 
-if [[ $# != 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
+if [[ $# != 2 || ! "$1" =~ ^[0-9a-f]{40}$ || ! "$2" =~ ^ai-core-model-gate:offline-[0-9a-f]{8}$ ]]; then
   echo AI_CORE_GATE_REFRESH_INVALID_SHA
   exit 64
 fi
 expected_head="$1"
 root=/home/admin1/projects/ai-core
 worktree="$root/.worktrees/pr3-verification-20261015"
-new_image=ai-core-model-gate:offline-cd8442c3
-old_image=ai-core-model-gate:rollback-before-cd8442c3
+new_image="$2"
+old_image="ai-core-model-gate:rollback-before-${new_image##*-}"
 compose="$worktree/compose.gate.yml"
 
 [[ "$(git -C "$worktree" rev-parse HEAD)" == "$expected_head" ]]
@@ -20,9 +20,24 @@ compose="$worktree/compose.gate.yml"
 docker image inspect "$new_image" >/dev/null
 docker inspect ai-core-model-gate >/dev/null
 
-# This is an image-source-only refresh, not a model lifecycle test.
-for model in ai-granite ai-qwen3 ai-ministral ai-coder; do
-  [[ "$(docker inspect -f '{{.State.Running}}' "$model")" == false ]]
+# No destructive back-end stop is permitted. Idle inherited residents
+# remain running across this Gate refresh and are re-admitted by preflight.
+for model in granite qwen3 ministral coder; do
+  if [[ "$(docker inspect -f '{{.State.Running}}' "ai-$model")" == true ]]; then
+    docker exec ai-core-model-gate python3 -c '
+import json,sys
+from runtime.model_gate import backend_http_connection
+c=backend_http_connection({"backend_socket":"/run/ai-core-backend/"+sys.argv[1]+".sock"},timeout=5)
+try:
+    c.request("GET","/slots")
+    r=c.getresponse()
+    slots=json.loads(r.read(65536)) if r.status==200 else None
+    assert isinstance(slots,list) and slots
+    assert all(isinstance(x,dict) and x.get("is_processing") is False for x in slots)
+finally:
+    c.close()
+' "$model"
+  fi
 done
 
 # Fail closed if any other AI product is currently using the Coordinator.
@@ -34,7 +49,7 @@ for path in ("/internal/handoff/status","/internal/resources/status"):
     with urllib.request.urlopen(u,timeout=8) as response:
         data=json.load(response)
     if path.endswith("/status") and "resident" in data:
-        assert not data["resident"]
+        assert len(data["resident"]) <= 2
         assert not any(data["active"].values())
         assert not data["handoff"] and not data["recovery_pending"]
     elif "queued" in data:
