@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 expected="${1:?exact branch head required}"
 mode="${2:-catalogue}"
-case "$mode" in catalogue|inference|result) :;; *) exit 64;; esac
+case "$mode" in catalogue|inference|legacy-inference|result) :;; *) exit 64;; esac
 root=/home/admin1/projects/ai-core
 worktree="$root/.worktrees/pr3-verification-20261015"
 [[ "$(git -C "$worktree" rev-parse HEAD)" == "$expected" ]]
@@ -37,10 +37,11 @@ if [[ "$mode" == result ]]; then
 fi
 
 docker exec -i astera-v8 sh -c 'umask 077; cat > /tmp/gace_ai_core_ast_v8_second_consumer.js' < "$worktree/$js"
+docker exec astera-v8 node --check "$container_script"
 key="$(docker exec ai-core-model-gate sh -c 'printf "%s" "$AI_CORE_API_KEY"')"
 [[ "${#key}" -ge 16 ]]
 
-if [[ "$mode" == inference ]]; then
+if [[ "$mode" == inference || "$mode" == legacy-inference ]]; then
   docker exec ai-core-model-gate python3 -c '
 import json,os,urllib.request
 h={"Authorization":"Bearer "+os.environ["AI_CORE_API_KEY"]}
@@ -55,13 +56,15 @@ assert not any(a["active"].values()) and b["queued"]==0
   base="/tmp/gace_ai_core_ast_v8_${expected:0:8}"
   docker exec astera-v8 sh -c 'test ! -e "$1" && test ! -e "$2" && test ! -e "$3"' _ "${base}.state" "${base}.pipe" "${base}.result"
   docker exec astera-v8 sh -c 'umask 077; mkfifo "$1"; echo PREPARED > "$2"' _ "${base}.pipe" "${base}.state"
+  selector=""
+  if [[ "$mode" == legacy-inference ]]; then selector=legacy; fi
   docker exec -d -e ASTERA_LLM_TIMEOUT_MS=240000 astera-v8 sh -c '
-    node "$1" inference < "$2" > "$3" 2>&1
+    node "$1" inference "$6" < "$2" > "$3" 2>&1
     rc=$?
     echo "$rc" > "$4"
     rm -f "$2"
     echo DONE > "$5"
-  ' _ "$container_script" "${base}.pipe" "${base}.result" "${base}.exit" "${base}.state"
+  ' _ "$container_script" "${base}.pipe" "${base}.result" "${base}.exit" "${base}.state" "$selector"
   printf '%s' "$key" | docker exec -i astera-v8 sh -c 'cat > "$1"' _ "${base}.pipe"
   unset key
   echo SECOND_CONSUMER_INFERENCE_STARTED=YES
