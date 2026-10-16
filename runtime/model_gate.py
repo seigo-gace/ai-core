@@ -786,10 +786,13 @@ def make_handler(coordinator, model, api_key):
                             self.end_headers()
                             stream_headers_sent = True
                             self.close_connection = True
+                            # Do not publish [DONE] until upstream reaches EOF.
+                            # An error after a terminal marker must never look
+                            # like a successful OpenAI-compatible completion.
                             total = 0
                             done = False
-                            pending_sse_line = b''
-                            awaiting_done_terminator = False
+                            terminal_event = b''
+                            pending_sse_event = b''
                             stream_error = None
                             while True:
                                 try:
@@ -804,34 +807,43 @@ def make_handler(coordinator, model, api_key):
                                 if total > MAX_RESPONSE_BYTES:
                                     stream_error = 'UPSTREAM_STREAM_TOO_LARGE'
                                     break
-                                # Only a complete SSE data event followed by
-                                # an empty line is a legitimate terminal marker.
-                                # A substring inside JSON content is not [DONE].
-                                pending_sse_line += chunk
-                                while b'\n' in pending_sse_line:
-                                    line, pending_sse_line = pending_sse_line.split(b'\n', 1)
-                                    line = line.rstrip(b'\r')
-                                    if line == b'data: [DONE]':
-                                        awaiting_done_terminator = True
-                                    elif line == b'' and awaiting_done_terminator:
-                                        done = True
-                                        awaiting_done_terminator = False
-                                    elif done and line.strip():
-                                        # A terminal event must be the final event.
-                                        # Additional upstream content cannot inherit success.
-                                        done = False
+                                pending_sse_event += chunk
+                                # Forward only complete events. Support both
+                                # LF and CRLF and boundaries split across reads.
+                                while True:
+                                    ends = [(pos, size) for sep, size in
+                                            ((b'\n\n', 2), (b'\r\n\r\n', 4))
+                                            if (pos := pending_sse_event.find(sep)) >= 0]
+                                    if not ends:
+                                        break
+                                    pos, size = min(ends)
+                                    event = pending_sse_event[:pos + size]
+                                    pending_sse_event = pending_sse_event[pos + size:]
+                                    if done:
                                         stream_error = 'UPSTREAM_STREAM_AFTER_DONE'
-                                        awaiting_done_terminator = False
+                                        break
+                                    lines = event.replace(b'\r\n', b'\n').split(b'\n')
+                                    data_lines = [line for line in lines
+                                                  if line.startswith(b'data:')]
+                                    if data_lines == [b'data: [DONE]']:
+                                        done = True
+                                        terminal_event = event
                                     else:
-                                        awaiting_done_terminator = False
-                                self.wfile.write(chunk)
-                                self.wfile.flush()
-                            if stream_error or not done:
+                                        self.wfile.write(event)
+                                        self.wfile.flush()
+                                if stream_error:
+                                    break
+                                if done and pending_sse_event.strip():
+                                    stream_error = 'UPSTREAM_STREAM_AFTER_DONE'
+                                    break
+                            if stream_error or not done or pending_sse_event.strip():
                                 code = stream_error or 'UPSTREAM_STREAM_INCOMPLETE'
-                                self.wfile.write(('\\n\\nevent: error\\ndata: ' +
+                                self.wfile.write(('\n\nevent: error\ndata: ' +
                                     json.dumps({'error': {'code': code}}) +
-                                    '\\n\\n').encode('utf-8'))
-                                self.wfile.flush()
+                                    '\n\n').encode('utf-8'))
+                            else:
+                                self.wfile.write(terminal_event)
+                            self.wfile.flush()
                         else:
                             # An invalid upstream framing header is a backend
                             # protocol failure, never a bad client request.
