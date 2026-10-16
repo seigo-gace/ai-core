@@ -167,6 +167,29 @@ class CoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(AdmissionError,'INVALID_WAIT_DEADLINE'):
             c.acquire_wait('coder',wait_seconds=-1)
 
+    def test_cold_start_after_wait_deadline_releases_inference_slot(self):
+        class SlowStart(FakeDriver):
+            def start(self, spec):
+                super().start(spec)
+                now[0] += 2.0
+        now=[100.0]
+        c=Coordinator(specs(),SlowStart(),clock=lambda: now[0])
+        with self.assertRaisesRegex(AdmissionError,'ADMISSION_DEADLINE_EXPIRED'):
+            c.acquire_wait('coder',wait_seconds=1)
+        self.assertEqual(c.active['coder'],0)
+        self.assertEqual(c.waiters,[])
+        # Even when the backend is ready, expiry must not strand the
+        # global active slot or block a later caller.
+        with c.lease('coder'):
+            self.assertEqual(c.active['coder'],1)
+        self.assertEqual(c.active['coder'],0)
+
+    def test_unknown_model_never_joins_wait_queue(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        with self.assertRaisesRegex(AdmissionError,'UNKNOWN_MODEL'):
+            c.acquire_wait('missing',wait_seconds=1)
+        self.assertEqual(c.waiters,[])
+
     def test_finite_wait_deadline_reclaims_queue(self):
         c=Coordinator(specs(),FakeDriver(('coder',)))
         with c.lease('coder'):
