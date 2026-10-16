@@ -875,6 +875,14 @@ def make_handler(coordinator, model, api_key):
                         fields = line.split()
                         if len(fields) == 2:
                             memory_events[fields[0]] = int(fields[1])
+                    # Pressure Stall Information is part of the parent
+                    # cgroup, not an estimated sum of model container limits.
+                    pressure = {}
+                    for kind in ('cpu', 'memory'):
+                        try:
+                            pressure[kind] = (root / (kind + '.pressure')).read_text().strip()
+                        except FileNotFoundError:
+                            pressure[kind] = None
                     with coordinator.lock:
                         active = dict(coordinator.active)
                         queued = len(coordinator.waiters)
@@ -882,6 +890,7 @@ def make_handler(coordinator, model, api_key):
                         transitioning = sorted(coordinator.transitioning)
                     data = {'memory': memory, 'cpu_max': cpu_max,
                             'cpu_stat': cpu_stat, 'memory_events': memory_events,
+                            'pressure': pressure,
                             'active': active, 'queued': queued,
                             'admission_inflight': inflight,
                             'transitioning': transitioning}
