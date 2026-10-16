@@ -1,6 +1,7 @@
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
     && rm -rf /var/lib/apt/lists/* \
+    && command -v docker \
     && pip install --no-cache-dir PyYAML==6.0.2
 WORKDIR /app
 COPY compose.runtime.yml /app/compose.runtime.yml
