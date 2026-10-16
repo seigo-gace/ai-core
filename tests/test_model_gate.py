@@ -163,6 +163,52 @@ class SourceTests(unittest.TestCase):
 
 
 class CoordinatorTests(unittest.TestCase):
+    def test_restarted_gate_keeps_journaled_lease_until_slots_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver=FakeDriver(('coder','qwen3'))
+            before=Coordinator(specs(),driver)
+            before.configure_recovery(tmp)
+            before.acquire('coder')
+            state=json.loads((Path(tmp)/'active-leases.json').read_text())
+            self.assertEqual(state['active']['coder'],1)
+            # Simulated process crash: a new Coordinator starts while the
+            # previous process had an active inference lease.
+            after=Coordinator(specs(),driver)
+            after.configure_recovery(tmp)
+            after.preflight()
+            self.assertEqual(after.orphaned,{'coder'})
+            with self.assertRaisesRegex(AdmissionError,'ORPHANED_LEASE'):
+                after.acquire('coder')
+            # Another idle model can still be swapped in. The orphaned
+            # backend may not be evicted or used until its slots are idle.
+            with after.lease('granite'):
+                self.assertIn('coder',driver.loaded)
+                self.assertNotIn('qwen3',driver.loaded)
+            after._backend_slots_idle=lambda name: True
+            after.recover_orphans()
+            self.assertEqual(after.orphaned,{'coder'})
+            after.recover_orphans()
+            self.assertEqual(after.orphaned,set())
+            with after.lease('coder'):
+                self.assertEqual(json.loads((Path(tmp)/'active-leases.json').read_text())['active']['coder'],1)
+            self.assertEqual(json.loads((Path(tmp)/'active-leases.json').read_text())['active']['coder'],0)
+
+    def test_corrupt_lease_journal_blocks_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/'active-leases.json').write_text('{not valid')
+            c=Coordinator(specs(),FakeDriver(('coder',)))
+            with self.assertRaisesRegex(AdmissionError,'LEASE_JOURNAL_CORRUPT'):
+                c.configure_recovery(tmp)
+            self.assertEqual(c.driver.ops,[])
+
+    def test_journal_write_failure_does_not_grant_lease(self):
+        c=Coordinator(specs(),FakeDriver(('coder',)))
+        with patch.object(c,'_persist_leases',side_effect=AdmissionError(503,'LEASE_JOURNAL_WRITE_FAILED')):
+            with self.assertRaisesRegex(AdmissionError,'LEASE_JOURNAL_WRITE_FAILED'):
+                c.acquire('coder')
+        self.assertEqual(c.active['coder'],0)
+        self.assertEqual(c.semaphore._value,2)
+
     def test_finite_wait_released_by_prior_lease(self):
         import time
         c=Coordinator(specs(),FakeDriver(('coder',)))
