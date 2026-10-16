@@ -1454,6 +1454,51 @@ class GateHttpTests(unittest.TestCase):
         self.assertNotIn(prompt, json.dumps(data))
         self.assertNotIn('messages', json.dumps(data))
 
+    def test_metrics_survive_gate_restart_without_payload_or_secrets(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.coord.configure_metrics(work)
+            self.coord.record_inference('coder', 2500, True,
+                                        first_token_ms=800, output_tokens=20)
+            self.coord.record_inference('granite', 3100, False)
+            filepath = Path(work) / 'inference-metrics-v1.json'
+            text = filepath.read_text()
+            self.assertNotIn('messages', text)
+            self.assertNotIn('Bearer', text)
+            self.assertNotIn('PRIVATE_PROMPT', text)
+            replacement = Coordinator(specs(), FakeDriver(), max_loaded=2,
+                                      max_active=2)
+            replacement.configure_metrics(work)
+            metrics = replacement.metrics_snapshot()
+            self.assertEqual(metrics['window_completed'], 2)
+            self.assertEqual(metrics['persistence'], 'READY')
+            self.assertEqual(metrics['model_metrics']['coder']['latency_ms_p50'], 2500)
+            self.assertEqual(metrics['model_metrics']['coder']['effective_output_tps_p50'], 8)
+            self.assertEqual(metrics['model_metrics']['granite']['failed'], 1)
+
+    def test_metric_corruption_is_reported_but_does_not_block_requests(self):
+        with tempfile.TemporaryDirectory() as work:
+            folder = Path(work)
+            (folder / 'inference-metrics-v1.json').write_text(
+                '{"schema":1,"samples":[{"model":"coder","prompt":"secret"}]}')
+            self.coord.configure_metrics(work)
+            self.assertEqual(self.coord.metrics_snapshot()['persistence'], 'CORRUPT')
+            self.assertEqual(self.coord.metrics_snapshot()['window_completed'], 0)
+            self.coord.record_inference('coder', 60, True, output_tokens=2)
+            self.assertEqual(self.coord.metrics_snapshot()['persistence'], 'READY')
+            self.assertEqual(self.coord.metrics_snapshot()['window_completed'], 1)
+
+    def test_metric_journal_stays_bounded_at_256_and_reloads(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.coord.configure_metrics(work)
+            for index in range(301):
+                self.coord.record_inference('coder', index+1, True)
+            replacement = Coordinator(specs(), FakeDriver(), max_loaded=2,
+                                      max_active=2)
+            replacement.configure_metrics(work)
+            self.assertEqual(replacement.metrics_snapshot()['window_completed'], 256)
+            self.assertEqual(len(replacement.metric_samples), 256)
+            self.assertEqual(replacement.metric_samples[0]['elapsed_ms'], 46)
+
     def test_metrics_bounded_percentiles_ignore_noncompleted_tokens(self):
         for value in range(1, 300):
             self.coord.record_inference('coder', value*100, value % 5 != 0,

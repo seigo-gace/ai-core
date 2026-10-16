@@ -400,6 +400,8 @@ class Coordinator:
         # Bounded, content-free actual inference samples shared across all Gates.
         self.metric_samples = deque(maxlen=256)
         self.metric_lock = threading.Lock()
+        self.metric_journal = None
+        self.metric_journal_state = 'IN_MEMORY'
 
     def record_inference(self, model, elapsed_ms, success, *,
                          first_token_ms=None, output_tokens=None):
@@ -411,6 +413,78 @@ class Coordinator:
                   'output_tokens': output_tokens}
         with self.metric_lock:
             self.metric_samples.append(sample)
+            self._persist_metric_samples()
+
+    def configure_metrics(self, folder):
+        """Keep bounded, content-free samples through Gate image restarts.
+
+        This uses the existing private Gate state volume, never a new service,
+        credential or raw request log. Damaged telemetry never blocks inference.
+        """
+        path = Path(folder) / 'inference-metrics-v1.json'
+        with self.metric_lock:
+            self.metric_samples.clear()
+            self.metric_journal = path
+            self.metric_journal_state = 'READY'
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                return
+            except OSError:
+                self.metric_journal_state = 'READ_FAILED'
+                return
+            try:
+                with os.fdopen(fd, 'rb') as stream:
+                    raw = stream.read(65537)
+                if len(raw) > 65536:
+                    raise ValueError('METRIC_FILE_TOO_LARGE')
+                payload = json.loads(raw.decode('utf-8'))
+                samples = payload['samples']
+                if (type(payload.get('schema')) is not int or
+                        payload['schema'] != 1 or
+                        not isinstance(samples, list) or len(samples) > 256):
+                    raise ValueError('METRIC_SCHEMA_INVALID')
+                for sample in samples:
+                    if not isinstance(sample, dict) or set(sample) != {
+                            'model', 'elapsed_ms', 'success',
+                            'first_token_ms', 'output_tokens'}:
+                        raise ValueError('METRIC_FIELDS_INVALID')
+                    if (sample['model'] not in self.specs or
+                            type(sample['elapsed_ms']) is not int or
+                            not 0 <= sample['elapsed_ms'] <= 86_400_000 or
+                            type(sample['success']) is not bool):
+                        raise ValueError('METRIC_VALUES_INVALID')
+                    for field in ('first_token_ms', 'output_tokens'):
+                        v = sample[field]
+                        if v is not None and (type(v) is not int or
+                                              not 0 <= v <= 86_400_000):
+                            raise ValueError('METRIC_VALUES_INVALID')
+                self.metric_samples.extend(samples)
+            except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+                self.metric_journal_state = 'CORRUPT'
+                self.metric_samples.clear()
+
+    def _persist_metric_samples(self):
+        if self.metric_journal is None:
+            return
+        # Called only under metric_lock. Atomic replace prevents partial
+        # JSON when Gate is terminated, and samples never contain text.
+        temp = self.metric_journal.with_suffix('.tmp')
+        payload = json.dumps({'schema': 1, 'samples': list(self.metric_samples)},
+                             separators=(',', ':'), sort_keys=True).encode('utf-8')
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC |
+                         os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, self.metric_journal)
+            self.metric_journal_state = 'READY'
+        except OSError:
+            # Never fail a successful inference because observability is
+            # temporarily unwritable. Expose the loss of persistence.
+            self.metric_journal_state = 'WRITE_FAILED'
 
     def metrics_snapshot(self):
         """Nearest-rank p50/p95 from a bounded window of completed requests."""
@@ -441,6 +515,7 @@ class Coordinator:
                              'effective_output_tps_p50': percentile(rates, .50),
                              'effective_output_tps_p95': percentile(rates, .95)}
         return {'window_capacity': 256, 'window_completed': len(samples),
+                'persistence': self.metric_journal_state,
                 'model_metrics': result}
 
     def _persist_leases(self):
@@ -1491,6 +1566,7 @@ def run_servers(coordinator, token, state_dir):
         except BlockingIOError as error:
             raise AdmissionError(409,'GATE_ALREADY_RUNNING') from error
         coordinator.configure_recovery(folder)
+        coordinator.configure_metrics(folder)
         coordinator.preflight()
         servers = []
         try:
