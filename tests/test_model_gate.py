@@ -43,7 +43,8 @@ def specs():
 class SourceTests(unittest.TestCase):
     def test_policy_and_four_model_contract(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
-        self.assertEqual((policy['max_resident'],policy['max_active']),(2,2))
+        self.assertEqual((policy['max_resident'],policy['max_active']),(2,1))
+        self.assertEqual(policy['idle_seconds'],600)
         self.assertEqual({m for m,x in policy['models'].items() if x['warm']},
                          set())
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
