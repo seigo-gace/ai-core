@@ -43,7 +43,8 @@ def specs():
 class SourceTests(unittest.TestCase):
     def test_policy_and_four_model_contract(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
-        self.assertEqual((policy['max_resident'],policy['max_active']),(2,2))
+        self.assertEqual((policy['max_resident'],policy['max_active']),(2,1))
+        self.assertEqual(policy['idle_seconds'],600)
         self.assertEqual({m for m,x in policy['models'].items() if x['warm']},
                          set())
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
@@ -140,6 +141,30 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(budget['parent_memory_current'], 14*1024**3)
             self.assertEqual(budget['selected_memory_ceiling'],
                              3*9216*(1024**2))
+
+    def test_resident_memory_and_active_cpu_have_separate_ceilings(self):
+        policy=load_policy(ROOT/'runtime/model-policy.yaml')
+        items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'ai-core.slice'
+            folder.mkdir()
+            (folder/'memory.max').write_text(str(36*1024**3))
+            (folder/'memory.high').write_text(str(34*1024**3))
+            (folder/'cpu.max').write_text('600000 100000')
+            budget=verify_parent_budget(items,policy,cgroup_root=Path(tmp),
+                                        control_group='/ai-core.slice')
+            self.assertEqual(policy['max_resident'],2)
+            self.assertEqual(policy['max_active'],1)
+            self.assertEqual(budget['selected_cpu_ceiling'],6)
+            self.assertEqual(budget['selected_memory_ceiling'],2*9216*1024**2)
+            with self.assertRaisesRegex(AdmissionError,'EXCEED_PARENT_BUDGET'):
+                verify_parent_budget(items,{**policy,'max_active':2},
+                                     cgroup_root=Path(tmp),control_group='/ai-core.slice')
+            (folder/'memory.max').write_text(str(10*1024**3))
+            (folder/'memory.high').write_text(str(9*1024**3))
+            with self.assertRaisesRegex(AdmissionError,'EXCEED_PARENT_BUDGET'):
+                verify_parent_budget(items,policy,cgroup_root=Path(tmp),
+                                     control_group='/ai-core.slice')
 
     def test_existing_parent_budget_preserved(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')

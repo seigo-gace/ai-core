@@ -5,7 +5,7 @@ This file describes a development candidate, not a production deployment.
 
 ## Normal operation
 - Four backend identities remain addressable; normal resident count <=2.
-- Admission leases protect models in use; global active requests <=2.
+- Admission leases protect models in use; the review performance candidate admits one active inference while retaining up to two resident models. This branch is not deployed.
 - Idle backends release memory when safe. The legacy 18080 router is retired: it is never started, proxied through, or used as an operational fallback. All inference requests must acquire a lease through the shared Coordinator and model-specific Gate.
 
 ## Bounded inference admission
@@ -45,3 +45,6 @@ must not be logged. Publicly accessible ports are not commissioned.
   backend client is active. Verify applicable Host admission and deployment
   readiness. Reuse existing Compose-owned containers. Do not grant the
   router Docker socket access or increase the 36 GiB/6-core ceilings.
+
+## External-review performance candidate (2026-11-28 JST)
+This source comparison increases each existing backend to six inference threads and six CPU cores, with one active inference and idle TTL 600 s. The approved parent CPU 6 / MemoryHigh 34 GiB / MemoryMax 36 GiB, normal resident maximum 2, temporary handoff maximum 3, model identities, private socket transport and lease/fairness ownership remain unchanged. RAM reservation uses resident count; CPU reservation uses active count. The kernel parent cgroup remains the aggregate enforcement boundary during loading. This is an alternative to the review's proposed 10 cores and four residents, which contradict the current adopted resource policy; do not deploy or claim performance improvement until measured contention, lifecycle, and correctness qualification. No DebugAI 50-case benchmark is restarted.

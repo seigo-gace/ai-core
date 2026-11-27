@@ -1,8 +1,8 @@
 # AI Core resident-model policy. Existing model tuning/limits remain in compose.runtime.yml.
 schema: ai-core/model-policy/v1
 max_resident: 2
-max_active: 2
-idle_seconds: 120
+max_active: 1
+idle_seconds: 600
 models:
   granite:
     gate_port: 18181

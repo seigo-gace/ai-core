@@ -197,11 +197,19 @@ def verify_parent_budget(specs, policy, *, cgroup_root=Path('/sys/fs/cgroup'),
         raise AdmissionError(503, 'PARENT_BUDGET_UNAVAILABLE') from error
     if not (mem_max > 0 and 0 < mem_high <= mem_max and cpu_cores > 0):
         raise AdmissionError(503, 'PARENT_BUDGET_INVALID')
-    count = policy['max_resident']
+    # Resident RAM and active inference CPU are different resources.
+    # A single admitted inference may use the existing 6-core ceiling while
+    # a second resident retains its KV cache. The parent cgroup also enforces
+    # aggregate CPU use during concurrent loading/cleanup.
+    resident_count = policy['max_resident']
+    active_count = policy.get('max_active', resident_count)
+    if not (type(resident_count) is int and type(active_count) is int
+            and 1 <= active_count <= resident_count <= len(specs)):
+        raise AdmissionError(409, 'INVALID_ADMISSION_LIMITS')
     maximum_memory = sum(sorted((x['memory_limit_bytes'] for x in specs.values()),
-                                reverse=True)[:count])
+                                reverse=True)[:resident_count])
     maximum_cpu = sum(sorted((x['cpu_limit'] for x in specs.values()),
-                             reverse=True)[:count])
+                             reverse=True)[:active_count])
     if maximum_memory > mem_max or maximum_cpu > cpu_cores + 0.01:
         raise AdmissionError(409, 'CONFIGURED_RESIDENTS_EXCEED_PARENT_BUDGET')
     return {'parent_memory_max':mem_max, 'parent_memory_high':mem_high,
@@ -935,7 +943,7 @@ class Coordinator:
         # Parent CPU quota governs active inference, not the number of
         # idle-but-resident models during a short handoff.
         budget = verify_parent_budget(
-            self.specs, {'max_resident': self.max_active})
+            self.specs, {'max_resident': self.max_loaded, 'max_active': self.max_active})
         projected = sum(sorted(
             (item['memory_limit_bytes'] for item in self.specs.values()),
             reverse=True)[:3])
