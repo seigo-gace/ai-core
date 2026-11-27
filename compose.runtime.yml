@@ -4,9 +4,9 @@ services:
     container_name: ai-granite
     cgroup_parent: ai-core.slice
     working_dir: /app
-    command: ["-m","/models/granite-4.2-8b-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/granite.sock","--port","8080"]
+    command: ["-m","/models/granite-4.2-8b-Q4_K_M.gguf","-c","8192","-t","6","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/granite.sock","--port","8080"]
     volumes: ["./models:/models:ro","ai-core-backend-bus:/run/ai-core-backend"]
-    cpus: 3
+    cpus: 6
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
@@ -17,9 +17,9 @@ services:
     container_name: ai-qwen3
     cgroup_parent: ai-core.slice
     working_dir: /app
-    command: ["-m","/models/Qwen3-8B-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/qwen3.sock","--port","8080"]
+    command: ["-m","/models/Qwen3-8B-Q4_K_M.gguf","-c","8192","-t","6","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/qwen3.sock","--port","8080"]
     volumes: ["./models:/models:ro","ai-core-backend-bus:/run/ai-core-backend"]
-    cpus: 3
+    cpus: 6
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
@@ -30,9 +30,9 @@ services:
     container_name: ai-ministral
     cgroup_parent: ai-core.slice
     working_dir: /app
-    command: ["-m","/models/Ministral-3-8B-Reasoning-2512-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/ministral.sock","--port","8080"]
+    command: ["-m","/models/Ministral-3-8B-Reasoning-2512-Q4_K_M.gguf","-c","8192","-t","6","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/ministral.sock","--port","8080"]
     volumes: ["./models:/models:ro","ai-core-backend-bus:/run/ai-core-backend"]
-    cpus: 3
+    cpus: 6
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
@@ -43,9 +43,9 @@ services:
     container_name: ai-coder
     cgroup_parent: ai-core.slice
     working_dir: /app
-    command: ["-m","/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/coder.sock","--port","8080"]
+    command: ["-m","/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf","-c","8192","-t","6","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/coder.sock","--port","8080"]
     volumes: ["./models:/models:ro","ai-core-backend-bus:/run/ai-core-backend"]
-    cpus: 3
+    cpus: 6
     cpuset: "0-5"
     mem_limit: 9216m
     memswap_limit: 14336m
