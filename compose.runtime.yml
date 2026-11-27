@@ -51,6 +51,21 @@ services:
     memswap_limit: 14336m
     restart: "no"
 
+  # Candidate only until the same shared Coordinator qualifies the model.
+  # Preserve all four existing services and their exact tuning.
+  qwen35:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: ai-qwen35
+    cgroup_parent: ai-core.slice
+    working_dir: /app
+    command: ["-m","/models/Qwen3.5-4B-Q4_K_M.gguf","-c","8192","-t","3","--cache-ram","4096","-np","1","--host","/run/ai-core-backend/qwen35.sock","--port","8080"]
+    volumes: ["./models:/models:ro","ai-core-backend-bus:/run/ai-core-backend"]
+    cpus: 3
+    cpuset: "0-5"
+    mem_limit: 9216m
+    memswap_limit: 14336m
+    restart: "no"
+
 # Shared exclusively by the existing AI Core Gate and model backends.
 volumes:
   ai-core-backend-bus:

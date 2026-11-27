@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.request
 
-PORTS = {"granite": 18181, "qwen3": 18182, "ministral": 18183, "coder": 18184}
+PORTS = {"granite": 18181, "qwen3": 18182, "ministral": 18183, "coder": 18184, "qwen35": 18185}
 def emit(**fields):
     print(json.dumps({"probe": "AI_CORE_UDS_REAL_INFERENCE", **fields}, sort_keys=True), flush=True)
 
@@ -44,6 +44,15 @@ def main():
         model_id = catalogue["data"][0]["id"]
         request = {"model": model_id, "messages": [{"role": "user", "content": "Reply OK."}],
                    "max_tokens": 1, "temperature": 0, "stream": False}
+        if model == "qwen35":
+            if model_id != "/models/Qwen3.5-4B-Q4_K_M.gguf":
+                emit(model=model, result="FAIL", error_code="CANDIDATE_MODEL_ID_MISMATCH")
+                return 1
+            # A one-token response can consist entirely of a reasoning marker.
+            # Exercise the explicit non-thinking template; rejection is a failed
+            # compatibility probe, not grounds to silently change the profile.
+            request["max_tokens"] = 64
+            request["chat_template_kwargs"] = {"enable_thinking": False}
         # Coordinator may spend up to 180s on cold startup. A 78s client
         # deadline falsely classifies a still-loading model as failed.
         status, answer = call(base + "/v1/chat/completions",
@@ -51,6 +60,12 @@ def main():
         choice_ok = bool(isinstance(answer.get("choices"), list) and answer["choices"]
                          and isinstance(answer["choices"][0], dict)
                          and isinstance(answer["choices"][0].get("message"), dict))
+        if model == "qwen35" and choice_ok:
+            choice = answer["choices"][0]
+            content = choice["message"].get("content")
+            choice_ok = (isinstance(content, str)
+                         and content.strip().rstrip(".").upper() == "OK"
+                         and choice.get("finish_reason") == "stop")
         elapsed = round(time.monotonic() - started, 3)
         after = None
         try:

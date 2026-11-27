@@ -33,14 +33,14 @@ class TestHostReadiness(unittest.TestCase):
     def run_probe(self, driver):
         return report(ROOT/'compose.runtime.yml',self.policy,driver=driver,
                       parent_budget=self.budget)
-    def test_four_running_blocks_without_mutation(self):
+    def test_all_registered_running_blocks_without_mutation(self):
         driver=ReadOnlyDriver(self.policy['models'])
         output=self.run_probe(driver)
-        self.assertEqual(output['running_backends'],4)
+        self.assertEqual(output['running_backends'],5)
         self.assertEqual(output['admission'],'BLOCKED')
         self.assertEqual(output['consumer_exclusivity'],'UNKNOWN')
         self.assertFalse(output['production_cutover_approved'])
-        self.assertEqual(len(driver.ops),4)
+        self.assertEqual(len(driver.ops),5)
         self.assertTrue(all(op=='inspect' for op,_ in driver.ops))
     def test_two_running_still_does_not_prove_traffic_exclusivity(self):
         out=self.run_probe(ReadOnlyDriver(('coder','qwen3')))

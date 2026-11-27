@@ -45,3 +45,29 @@ must not be logged. Publicly accessible ports are not commissioned.
   backend client is active. Verify applicable Host admission and deployment
   readiness. Reuse existing Compose-owned containers. Do not grant the
   router Docker socket access or increase the 36 GiB/6-core ceilings.
+
+## Qwen3.5-4B qualification candidate (2026-11-28 JST)
+This branch adds the fifth *selectable local candidate* (not a fifth normally resident
+model) without changing the four established model IDs, sockets, limits, or
+consumer roles. The temporary five-model inventory is for qualification only;
+DebugAI's final specialist composition remains governed by its own Issue #41.
+The candidate gate is loopback 18185, with a private Unix backend and on-demand
+loading by the **same Coordinator**. No old router, second Coordinator, public
+endpoint, new credential, or provider call. Existing parent CPU6 / High34GiB /
+Max36GiB, max resident 2, max active 2, idle 120s and temporary handoff max 3
+are unchanged; the model inherits the existing 3-thread/8192-context/9GiB
+per-container baseline for measurement, not as an asserted optimum.
+
+Host entry criteria: verify that 18185 is unused, the already downloaded GGUF
+matches the recorded checksum, the installed llama.cpp image supports its
+architecture/chat template, and existing consumers and lease state are safe.
+Create only the candidate backend (stopped) through the existing ai-core Compose
+owner. A Gate candidate image must contain both exact Compose and policy; the
+old runtime-only Gate refresh and historical four-backend cutover scripts
+cannot be reused unchanged to deploy this model. Retain the prior Gate image
+and four-model Compose/healthcheck for rollback. Do not deploy until the
+transaction, rollback, and source qualification have been verified. The
+candidate inference probe checks exact model identity and actual "OK" completion,
+rather than only the existence of a message. Cold/warm, JSON, thinking toggle,
+tool calls, lease/handoff/reclaim and measured CPU/RAM remain live acceptance
+conditions. This does not restart DebugAI's paused 50-question suite.

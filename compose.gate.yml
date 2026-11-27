@@ -1,4 +1,4 @@
-# New AI Core gate only. Existing four backends are NOT recreated by this file.
+# AI Core Gate only. Model backends are NOT recreated by this file.
 # Supply the already provisioned API key in the deploying environment.
 services:
   gate:
@@ -26,7 +26,7 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; [urllib.request.urlopen('http://127.0.0.1:%d/health'%p,timeout=2).close() for p in (18181,18182,18183,18184)]"]
+      test: ["CMD", "python3", "-c", "import urllib.request, yaml; p=yaml.safe_load(open('/app/runtime/model-policy.yaml',encoding='utf-8')); [urllib.request.urlopen('http://127.0.0.1:%d/health'%m['gate_port'],timeout=2).close() for m in p['models'].values()]"]
       interval: 20s
       timeout: 10s
       retries: 3

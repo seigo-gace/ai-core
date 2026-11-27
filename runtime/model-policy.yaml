@@ -16,3 +16,6 @@ models:
   coder:
     gate_port: 18184
     warm: false
+  qwen35:
+    gate_port: 18185
+    warm: false
