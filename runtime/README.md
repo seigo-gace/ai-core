@@ -97,3 +97,26 @@ collection, explicit price ceilings ($0.20/M prompt, $1/M completion), no
 silent fallback/retry and no raw provider reasoning/error bodies. Keep the
 existing account's cumulative $10 key limit. Live key authorization, real
 completion, teacher judgment and training are separate acceptance checks.
+
+## Offline Qwen3.5-4B text distillation backend
+`runtime/qwen_distillation.py` uses the exact Qwen3.5 text head from its
+immutable official Safetensors checkpoint, not the serving GGUF. The owner
+injects the authenticated KB authorized/independently accepted batch reader;
+there is no public CLI, caller-supplied rights grant, new service or model.
+The reader is currently NOT_CONNECTED, so actual KB training remains denied.
+Teacher projections from DebugAI are candidates, not permission. Train only
+accepted SFT/recovery data, never held-out answers. Verify prompt and output
+hashes and the official chat-template completion-only labels; no truncation
+or silent substitution. PEFT all-linear LoRA (r16), token-weighted loss,
+finite gradient and actual weight-update checks, immutable adapter files and
+run receipt. A previous verified adapter can continue on the same base.
+Defaults are initial engineering settings, not tuned hyperparameters.
+Host CPU <=6 and admitted memory bounds remain authoritative. BF16 is preferred
+on a supported accelerator; CPU FP32 is a possible measured fallback, not a
+qualified or fast configuration. Actual checkpoint load, optimizer run,
+independent quality, GGUF conversion, resource qualification, trusted KB
+readback and adoption/rollback remain separate. Never claim training success
+from these contract tests. Official sources:
+https://huggingface.co/docs/transformers/model_doc/qwen3_5 ;
+https://huggingface.co/Qwen/Qwen3.5-4B/raw/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/chat_template.jinja ;
+https://huggingface.co/docs/peft/main/package_reference/lora .
