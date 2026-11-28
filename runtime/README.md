@@ -80,9 +80,15 @@ Vault. The narrowly scoped AI Core caller file is mounted read-only using
 `compose.gate.openrouter.yml` only after provisioning. No caller file means
 the remote listener is not enabled. The Gate retains its existing UID and
 capability restrictions. Before the overlay is used, verify the dedicated
-caller file's owner/group is UID/GID 1000, that the host group contains only
-the existing owner, and grant read-only group access (0640); the overlay
-adds precisely that group. Never grant DAC override or use an admin token. The remote model ID is the pinned
+caller file owner is UID 1000 and determine its actual GID; verify the group
+contains only the existing owner (primary and supplementary memberships).
+Only after that verification, grant read-only group access (0640) to this
+dedicated caller file. Set `AI_CORE_CALLER_FILE_EXPECTED_GID` to the verified
+GID in the existing Compose environment. The overlay requires it, adds that
+exact group, and checks actual UID/GID/mode on the opened file descriptor.
+A 0600 file owned by UID 1000 is not readable by the existing UID 0 Gate
+with all capabilities dropped; removing `group_add` does not fix this.
+Never grant DAC override or use an admin token. The remote model ID is the pinned
 `deepseek/deepseek-v4.1-flash-1017` catalog ID, and actual response identity
 must agree; /v1/models is configured identity, not proof of provider access.
 The external candidate accepts only explicit SYNTHETIC_QUALIFICATION text
