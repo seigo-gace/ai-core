@@ -36,6 +36,21 @@ def read_caller_token(path):
         if (not stat.S_ISREG(info.st_mode) or mode not in (0o600, 0o640) or
                 (mode == 0o640 and info.st_gid not in set(os.getgroups()) | {os.getegid()})):
             raise ValueError("CALLER_FILE_INVALID")
+        expected = [os.environ.get("AI_CORE_CALLER_FILE_EXPECTED_" + field)
+                    for field in ("UID", "GID", "MODE")]
+        if any(value is not None for value in expected):
+            uid, gid, expected_mode = expected
+            if (uid is None or gid is None or expected_mode not in ("0600", "0640")
+                    or not uid.isascii() or not uid.isdecimal()
+                    or not gid.isascii() or not gid.isdecimal()
+                    or len(uid) > 10 or len(gid) > 10):
+                raise ValueError("CALLER_FILE_EXPECTATION_INVALID")
+            if (info.st_uid, info.st_gid, mode) != (int(uid), int(gid), int(expected_mode, 8)):
+                raise ValueError("CALLER_FILE_METADATA_MISMATCH")
+        # A private 0600 file must belong to this process; group membership
+        # cannot make it readable to a different UID.
+        if mode == 0o600 and info.st_uid != os.geteuid():
+            raise ValueError("CALLER_FILE_OWNER_MISMATCH")
         token = stream.read(1025).strip()
     if not 24 <= len(token) <= 1024 or "\n" in token or "\r" in token:
         raise ValueError("CALLER_TOKEN_INVALID")
