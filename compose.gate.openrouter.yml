@@ -4,8 +4,11 @@ services:
   gate:
     environment:
       AI_CORE_OPENROUTER_TOKEN_FILE: /run/secrets/ai-core-openrouter-caller
+      AI_CORE_CALLER_FILE_EXPECTED_UID: "1000"
+      AI_CORE_CALLER_FILE_EXPECTED_GID: "${AI_CORE_CALLER_FILE_EXPECTED_GID:?verify an owner-private caller group first}"
+      AI_CORE_CALLER_FILE_EXPECTED_MODE: "0640"
     group_add:
-      - "1000"
+      - "${AI_CORE_CALLER_FILE_EXPECTED_GID:?verify an owner-private caller group first}"
     volumes:
       - type: bind
         source: /home/admin1/.config/libral-vault/ai-core-token
