@@ -1,8 +1,16 @@
-# Refresh the admitted Gate image using only the AI Core runtime/ context.
+# Refresh the admitted Gate image without downloading dependencies.
 # Pass --build-arg GATE_BASE_IMAGE=<verified-existing-local-image>.
+# Default (runtime-only): retain the existing runtime/ build context.
+# Full registry refresh: use --target full-refresh with the clean repo root context.
 # The parent already contains pinned Python dependencies and Docker CLI.
-# No APT, network, credentials, model weights or host .env enter this build.
+# No APT, network, credentials, model weights or host .env enter this image.
 ARG GATE_BASE_IMAGE
-FROM ${GATE_BASE_IMAGE}
+FROM ${GATE_BASE_IMAGE} AS refresh-base
 WORKDIR /app
+
+FROM refresh-base AS full-refresh
+COPY compose.runtime.yml /app/compose.runtime.yml
+COPY runtime/ /app/runtime/
+
+FROM refresh-base AS runtime-only
 COPY . /app/runtime/
