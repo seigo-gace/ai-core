@@ -50,6 +50,7 @@ class RemoteGateTests(unittest.TestCase):
         self.assertEqual(result["usage"]["cost"], 0.001)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0], "test-caller-only")
+        self.assertEqual(self.calls[0][1]["reasoning"], {"effort": "none"})
         p = self.calls[0][1]["provider"]
         self.assertTrue(p["enforce_distillable_text"])
         self.assertEqual(p["data_collection"], "deny")
