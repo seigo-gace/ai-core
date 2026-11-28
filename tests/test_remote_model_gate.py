@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from runtime.remote_model_gate import (MODEL_ID, make_remote_handler, read_caller_token,
                                       normalize_completion, RemoteGateError)
@@ -78,3 +79,35 @@ class RemoteGateTests(unittest.TestCase):
             self.assertEqual(read_caller_token(p),"test-private-caller-token-0123456789")
             os.chmod(p,0o644)
             with self.assertRaises(ValueError): read_caller_token(p)
+
+    def test_caller_metadata_exact_match_and_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/"token"
+            p.write_text("test-private-caller-token-0123456789")
+            os.chmod(p,0o600)
+            info=p.stat()
+            expected={"AI_CORE_CALLER_FILE_EXPECTED_UID":str(info.st_uid),
+                      "AI_CORE_CALLER_FILE_EXPECTED_GID":str(info.st_gid),
+                      "AI_CORE_CALLER_FILE_EXPECTED_MODE":"0600"}
+            with patch.dict(os.environ,expected,clear=True):
+                self.assertEqual(read_caller_token(p),"test-private-caller-token-0123456789")
+                for key,value in (("AI_CORE_CALLER_FILE_EXPECTED_UID",str(info.st_uid+1)),
+                                  ("AI_CORE_CALLER_FILE_EXPECTED_GID",str(info.st_gid+1)),
+                                  ("AI_CORE_CALLER_FILE_EXPECTED_MODE","0640")):
+                    with patch.dict(os.environ,{key:value}):
+                        with self.assertRaisesRegex(ValueError,"CALLER_FILE_METADATA_MISMATCH"):
+                            read_caller_token(p)
+
+    def test_caller_metadata_partial_or_malformed_expectation_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/"token"
+            p.write_text("test-private-caller-token-0123456789")
+            os.chmod(p,0o600)
+            info=p.stat()
+            for expected in ({"AI_CORE_CALLER_FILE_EXPECTED_GID":str(info.st_gid)},
+                             {"AI_CORE_CALLER_FILE_EXPECTED_UID":str(info.st_uid),
+                              "AI_CORE_CALLER_FILE_EXPECTED_GID":"not-a-gid",
+                              "AI_CORE_CALLER_FILE_EXPECTED_MODE":"0600"}):
+                with patch.dict(os.environ,expected,clear=True):
+                    with self.assertRaisesRegex(ValueError,"CALLER_FILE_EXPECTATION_INVALID"):
+                        read_caller_token(p)
