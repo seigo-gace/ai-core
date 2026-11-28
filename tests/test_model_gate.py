@@ -41,18 +41,41 @@ def specs():
 
 
 class SourceTests(unittest.TestCase):
-    def test_policy_and_four_model_contract(self):
+    def test_policy_and_candidate_model_contract(self):
         policy=load_policy(ROOT/'runtime/model-policy.yaml')
         self.assertEqual((policy['max_resident'],policy['max_active']),(2,2))
         self.assertEqual({m for m,x in policy['models'].items() if x['warm']},
                          set())
         items=model_specs_from_compose(ROOT/'compose.runtime.yml',policy)
-        self.assertEqual(set(items),set(specs()))
+        self.assertEqual(set(items),set(specs()) | {'qwen35'})
         self.assertEqual(items['ministral']['backend_socket'],
                          '/run/ai-core-backend/ministral.sock')
         self.assertEqual(items['coder']['model_id'],
                          '/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf')
         self.assertEqual(items['qwen3']['memory_limit_bytes'],9216*(1024**2))
+    def test_qwen35_candidate_preserves_shared_budget_and_private_socket(self):
+        policy = load_policy(ROOT/'runtime/model-policy.yaml')
+        items = model_specs_from_compose(ROOT/'compose.runtime.yml', policy)
+        candidate = items['qwen35']
+        self.assertEqual(candidate['model_id'], '/models/Qwen3.5-4B-Q4_K_M.gguf')
+        self.assertEqual(candidate['gate_port'], 18185)
+        self.assertEqual(candidate['backend_socket'], '/run/ai-core-backend/qwen35.sock')
+        self.assertNotIn('backend_port', candidate)
+        self.assertFalse(candidate['warm'])
+        self.assertEqual((policy['max_resident'], policy['max_active'], policy['idle_seconds']),
+                         (2, 2, 120))
+        driver = FakeDriver(('coder', 'granite'))
+        coordinator = Coordinator(items, driver, max_loaded=policy['max_resident'],
+                                  max_active=policy['max_active'])
+        with coordinator.lease('qwen35'):
+            self.assertIn('qwen35', driver.loaded)
+            self.assertLessEqual(len(driver.loaded), 2)
+            self.assertEqual(coordinator.active['qwen35'], 1)
+        self.assertEqual(coordinator.active['qwen35'], 0)
+        with coordinator.lease('granite'):
+            self.assertIn('granite', driver.loaded)
+            self.assertLessEqual(len(driver.loaded), 2)
+
     def test_policy_rejects_boolean_numeric_fields(self):
         import copy
         import yaml

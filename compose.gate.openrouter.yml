@@ -1,0 +1,20 @@
+# Optional overlay for the existing Gate only. No new service or local model.
+# Use only after Libral Vault AI Core consumer provisioning and key verification.
+services:
+  gate:
+    environment:
+      AI_CORE_OPENROUTER_TOKEN_FILE: /run/secrets/ai-core-openrouter-caller
+      AI_CORE_CALLER_FILE_EXPECTED_UID: "1000"
+      AI_CORE_CALLER_FILE_EXPECTED_GID: "${AI_CORE_CALLER_FILE_EXPECTED_GID:?verify an owner-private caller group first}"
+      AI_CORE_CALLER_FILE_EXPECTED_MODE: "0640"
+    group_add:
+      - "${AI_CORE_CALLER_FILE_EXPECTED_GID:?verify an owner-private caller group first}"
+    volumes:
+      - type: bind
+        source: /home/admin1/.config/libral-vault/ai-core-token
+        target: /run/secrets/ai-core-openrouter-caller
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, yaml; p=yaml.safe_load(open('/app/runtime/model-policy.yaml',encoding='utf-8')); [urllib.request.urlopen('http://127.0.0.1:%d/health'%n,timeout=2).close() for n in [m['gate_port'] for m in p['models'].values()]+[18186]]"]
