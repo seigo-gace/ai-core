@@ -4,6 +4,8 @@ services:
   gate:
     environment:
       AI_CORE_OPENROUTER_TOKEN_FILE: /run/secrets/ai-core-openrouter-caller
+    group_add:
+      - "1000"
     volumes:
       - type: bind
         source: /home/admin1/.config/libral-vault/ai-core-token

@@ -78,7 +78,11 @@ Use the existing AI Core Gate process and API credential with loopback port
 model, queue, or Coordinator. The provider key stays in the existing Libral
 Vault. The narrowly scoped AI Core caller file is mounted read-only using
 `compose.gate.openrouter.yml` only after provisioning. No caller file means
-the remote listener is not enabled. The remote model ID is the pinned
+the remote listener is not enabled. The Gate retains its existing UID and
+capability restrictions. Before the overlay is used, verify the dedicated
+caller file's owner/group is UID/GID 1000, that the host group contains only
+the existing owner, and grant read-only group access (0640); the overlay
+adds precisely that group. Never grant DAC override or use an admin token. The remote model ID is the pinned
 `deepseek/deepseek-v4.1-flash-1017` catalog ID, and actual response identity
 must agree; /v1/models is configured identity, not proof of provider access.
 The external candidate accepts only explicit SYNTHETIC_QUALIFICATION text

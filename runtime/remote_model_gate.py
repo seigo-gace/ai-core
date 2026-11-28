@@ -29,7 +29,12 @@ def read_caller_token(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "r", encoding="utf-8") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        mode = stat.S_IMODE(info.st_mode)
+        # The existing Vault runs as UID 1000 while the capability-stripped
+        # Gate runs as UID 0. Use only a verified owner-private group read
+        # grant for this dedicated caller file, never DAC override/admin token.
+        if (not stat.S_ISREG(info.st_mode) or mode not in (0o600, 0o640) or
+                (mode == 0o640 and info.st_gid not in set(os.getgroups()) | {os.getegid()})):
             raise ValueError("CALLER_FILE_INVALID")
         token = stream.read(1025).strip()
     if not 24 <= len(token) <= 1024 or "\n" in token or "\r" in token:

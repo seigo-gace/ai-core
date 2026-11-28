@@ -74,5 +74,7 @@ class RemoteGateTests(unittest.TestCase):
             p.write_text("test-private-caller-token-0123456789")
             os.chmod(p,0o600)
             self.assertEqual(read_caller_token(p),"test-private-caller-token-0123456789")
+            os.chmod(p,0o640)
+            self.assertEqual(read_caller_token(p),"test-private-caller-token-0123456789")
             os.chmod(p,0o644)
             with self.assertRaises(ValueError): read_caller_token(p)
