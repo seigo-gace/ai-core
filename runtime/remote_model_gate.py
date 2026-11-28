@@ -75,7 +75,9 @@ def validate_completion(body):
         raise RemoteGateError(422, "REMOTE_MESSAGES_INVALID")
     # OpenRouter routes only to distillation-compatible providers; do not
     # silently widen provider or price policy or retry ambiguous paid calls.
-    return {**body, "provider": {
+    # Require the visible answer, not an exhausted hidden-reasoning budget.
+    # The fixed DeepSeek configuration was verified by the real teacher run.
+    return {**body, "reasoning": {"effort": "none"}, "provider": {
         "enforce_distillable_text": True, "data_collection": "deny",
         "require_parameters": True, "allow_fallbacks": False,
         "max_price": {"prompt": 0.20, "completion": 1.0},
