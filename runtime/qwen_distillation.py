@@ -185,6 +185,44 @@ def run_sft(*, read_authorized_verified_batch, dataset_version, checkpoint_dir,
             seed=42, learning_rate=1e-4, previous_adapter=None, previous_adapter_sha256=None):
     """Offline training only; neither production adoption nor quality approval."""
     rows = read_verified_batch(read_authorized_verified_batch, dataset_version)
+    return _run_sft_rows(rows=rows, training_scope="VERIFIED_KB_TEACHER",
+                         dataset_version=dataset_version, checkpoint_dir=checkpoint_dir,
+                         checkpoint_revision=checkpoint_revision, checkpoint_sha256=checkpoint_sha256,
+                         output_dir=output_dir, device=device, dtype=dtype, epochs=epochs,
+                         max_length=max_length, accumulation=accumulation, cpu_threads=cpu_threads,
+                         seed=seed, learning_rate=learning_rate, previous_adapter=previous_adapter,
+                         previous_adapter_sha256=previous_adapter_sha256)
+
+
+def qualify_local_cpu_optimizer(*, checkpoint_dir, checkpoint_revision,
+                                checkpoint_sha256, qualification_dir):
+    """Fixed local engineering fixture; not a KB reader or teacher result.
+
+    Never usable as a prior adapter for the teacher run. No external input,
+    transmission, KB mutation, provider call or production adoption.
+    """
+    target = Path(qualification_dir)
+    require(target.name == "qwen-cpu-optimizer-qualification-v1",
+            "DISTILLATION_QUALIFICATION_PATH_INVALID")
+    messages = [
+        {"role": "system", "content": "検証結果を正確に報告。"},
+        {"role": "user", "content": "修正済みだがCI未実行。完了か？"},
+        {"role": "assistant", "content": "未完了。CIを実行し、結果を確認する。"},
+    ]
+    return _run_sft_rows(rows=[("local-optimizer-fixture-01", digest(messages), messages)],
+                         training_scope="LOCAL_SYNTHETIC_OPTIMIZER_QUALIFICATION",
+                         dataset_version="local-fixed-qualification-v1",
+                         checkpoint_dir=checkpoint_dir, checkpoint_revision=checkpoint_revision,
+                         checkpoint_sha256=checkpoint_sha256, output_dir=target,
+                         device="cpu", dtype="float32", epochs=1, max_length=512,
+                         accumulation=1, cpu_threads=6, seed=42, learning_rate=1e-4,
+                         previous_adapter=None, previous_adapter_sha256=None)
+
+
+def _run_sft_rows(*, rows, training_scope, dataset_version, checkpoint_dir,
+                  checkpoint_revision, checkpoint_sha256, output_dir, device, dtype,
+                  epochs, max_length, accumulation, cpu_threads, seed, learning_rate,
+                  previous_adapter, previous_adapter_sha256):
     require(device in ("cpu", "cuda") and dtype in ("bfloat16", "float32")
             and type(epochs) is int and 1 <= epochs <= 20
             and type(max_length) is int and 16 <= max_length <= 8192
@@ -221,6 +259,11 @@ def run_sft(*, read_authorized_verified_batch, dataset_version, checkpoint_dir,
                         and file_digest(prior / f) == s for f, s in previous_adapter_sha256.items()),
                 "DISTILLATION_PRIOR_ADAPTER_HASH_MISMATCH")
         cfg = json.loads((prior / "adapter_config.json").read_text(encoding="utf-8"))
+        prior_receipt = json.loads((prior / "training-result.json").read_text(encoding="utf-8"))
+        require(prior_receipt.get("training_scope") == "VERIFIED_KB_TEACHER"
+                and prior_receipt.get("artifact_sha256") == previous_adapter_sha256
+                and prior_receipt.get("checkpoint_revision") == checkpoint_revision,
+                "DISTILLATION_PRIOR_SCOPE_INVALID")
         require(cfg.get("base_model_name_or_path") == MODEL and cfg.get("revision") == checkpoint_revision,
                 "DISTILLATION_PRIOR_BASE_MISMATCH")
         model = PeftModel.from_pretrained(model, prior, is_trainable=True)
@@ -245,6 +288,8 @@ def run_sft(*, read_authorized_verified_batch, dataset_version, checkpoint_dir,
         artifacts = {name: file_digest(stage / name)
                      for name in ("adapter_config.json", "adapter_model.safetensors")}
         report = {"schema": "gace.qwen-lora-result.v1", "model": MODEL,
+                  "training_scope": training_scope,
+                  "teacher_model": TEACHER if training_scope == "VERIFIED_KB_TEACHER" else None,
                   "checkpoint_revision": checkpoint_revision, "checkpoint_sha256": checkpoint_sha256,
                   "dataset_version": dataset_version,
                   "examples": [{"case_id": case, "example_digest": sha} for case, sha, _, _ in encoded],
