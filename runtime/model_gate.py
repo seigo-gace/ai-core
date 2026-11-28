@@ -1569,14 +1569,34 @@ def run_servers(coordinator, token, state_dir):
         coordinator.configure_metrics(folder)
         coordinator.preflight()
         servers = []
+        started_servers = []
         try:
             for model,spec in coordinator.specs.items():
                 server = ThreadingHTTPServer(('127.0.0.1',spec['gate_port']),
                                              make_handler(coordinator,model,token))
                 server.daemon_threads = True
                 servers.append(server)
+            # External inference does not own a Docker lease or resident slot.
+            # It shares this same Gate process and existing API credential.
+            token_file = os.environ.get('AI_CORE_OPENROUTER_TOKEN_FILE')
+            if token_file:
+                if __package__:
+                    from .remote_model_gate import make_remote_handler, read_caller_token, REMOTE_PORT
+                else:
+                    from remote_model_gate import make_remote_handler, read_caller_token, REMOTE_PORT
+                if REMOTE_PORT in {s['gate_port'] for s in coordinator.specs.values()}:
+                    raise AdmissionError(503, 'REMOTE_GATE_PORT_COLLISION')
+                try:
+                    remote_caller = read_caller_token(token_file)
+                except (OSError, ValueError) as error:
+                    raise AdmissionError(503, 'REMOTE_GATE_CALLER_NOT_READY') from error
+                remote = ThreadingHTTPServer(('127.0.0.1', REMOTE_PORT),
+                                             make_remote_handler(token, remote_caller))
+                remote.daemon_threads = True
+                servers.append(remote)
             for server in servers:
                 threading.Thread(target=server.serve_forever,daemon=True).start()
+                started_servers.append(server)
             stop = threading.Event()
             def on_signal(*_):
                 stop.set()
@@ -1598,8 +1618,9 @@ def run_servers(coordinator, token, state_dir):
                     # The next maintenance cycle retries eligible models.
                     pass
         finally:
-            for server in servers:
+            for server in started_servers:
                 server.shutdown()
+            for server in servers:
                 server.server_close()
 
 

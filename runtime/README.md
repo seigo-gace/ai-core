@@ -71,3 +71,19 @@ candidate inference probe checks exact model identity and actual "OK" completion
 rather than only the existence of a message. Cold/warm, JSON, thinking toggle,
 tool calls, lease/handoff/reclaim and measured CPU/RAM remain live acceptance
 conditions. This does not restart DebugAI's paused 50-question suite.
+
+## DeepSeek external candidate (same Gate, optional overlay)
+Use the existing AI Core Gate process and API credential with loopback port
+18186. This is an external transport, not a sixth local container, resident
+model, queue, or Coordinator. The provider key stays in the existing Libral
+Vault. The narrowly scoped AI Core caller file is mounted read-only using
+`compose.gate.openrouter.yml` only after provisioning. No caller file means
+the remote listener is not enabled. The remote model ID is the pinned
+`deepseek/deepseek-v4.1-flash-1017` catalog ID, and actual response identity
+must agree; /v1/models is configured identity, not proof of provider access.
+The external candidate accepts only explicit SYNTHETIC_QUALIFICATION text
+packets, bounded JSON output, distillable-only provider routing, no data
+collection, explicit price ceilings ($0.20/M prompt, $1/M completion), no
+silent fallback/retry and no raw provider reasoning/error bodies. Keep the
+existing account's cumulative $10 key limit. Live key authorization, real
+completion, teacher judgment and training are separate acceptance checks.
